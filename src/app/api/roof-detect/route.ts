@@ -198,6 +198,7 @@ export async function POST(req: NextRequest) {
     return {
       id: face.id,
       points: meterPoints,
+      pixelPoints: face.points, // Grokが返した生のピクセル座標
       slope_direction: face.slope_direction,
       ridge_edge: face.ridge_edge,
       eave_edge: face.eave_edge,
