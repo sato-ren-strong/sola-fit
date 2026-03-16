@@ -211,5 +211,6 @@ export async function POST(req: NextRequest) {
     faces,
     metersPerPixel,
     imageSize: size,
+    satelliteImage: `data:image/png;base64,${imgBase64}`,
   });
 }

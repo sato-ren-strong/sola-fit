@@ -24,6 +24,7 @@ interface RoofDetectResult {
   faces: RoofFace[];
   metersPerPixel: number;
   imageSize: number;
+  satelliteImage: string; // data:image/png;base64,...
 }
 
 interface Props {
@@ -134,44 +135,42 @@ export default function RoofSimulator({ insights }: Props) {
     detectRoof();
   }, [detectRoof]);
 
-  // Canvas描画 — Grokのピクセル座標をそのまま忠実に描画
+  // Canvas描画 — 衛星写真の上にGrokのピクセル座標を重ねて描画
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !roofResult || roofResult.faces.length === 0) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const { faces, imageSize, metersPerPixel } = roofResult;
+    const { faces, imageSize, metersPerPixel, satelliteImage } = roofResult;
     const W = canvas.width;
     const H = canvas.height;
 
-    // ピクセル座標の範囲を求める
-    let minPx = Infinity, maxPx = -Infinity, minPy = Infinity, maxPy = -Infinity;
-    for (const face of faces) {
-      for (const p of face.pixelPoints) {
-        if (p[0] < minPx) minPx = p[0];
-        if (p[0] > maxPx) maxPx = p[0];
-        if (p[1] < minPy) minPy = p[1];
-        if (p[1] > maxPy) maxPy = p[1];
-      }
-    }
+    // 衛星画像(imageSize x imageSize)をCanvas(W x H)にフィット
+    const imgScale = Math.min(W / imageSize, H / imageSize);
+    const imgOffX = (W - imageSize * imgScale) / 2;
+    const imgOffY = (H - imageSize * imgScale) / 2;
 
-    // パディング付きでキャンバスにフィット
-    const pad = 60;
-    const rangeX = maxPx - minPx || 1;
-    const rangeY = maxPy - minPy || 1;
-    const scale = Math.min((W - pad * 2) / rangeX, (H - pad * 2) / rangeY);
-    const offX = (W - rangeX * scale) / 2;
-    const offY = (H - rangeY * scale) / 2;
-
+    // Grokのピクセル座標をCanvas座標に変換（衛星画像と同じスケール）
     const toCanvas = (px: number, py: number): Point => ({
-      x: (px - minPx) * scale + offX,
-      y: (py - minPy) * scale + offY,
+      x: px * imgScale + imgOffX,
+      y: py * imgScale + imgOffY,
     });
 
     ctx.clearRect(0, 0, W, H);
     ctx.fillStyle = "#0f172a";
     ctx.fillRect(0, 0, W, H);
+
+    // 衛星写真を背景に描画
+    const img = new Image();
+    img.onload = () => {
+      ctx.drawImage(img, imgOffX, imgOffY, imageSize * imgScale, imageSize * imgScale);
+      drawOverlay();
+    };
+    img.src = satelliteImage;
+
+    function drawOverlay() {
+      if (!ctx) return;
 
     // 屋根面を描画（ピクセル座標そのまま）
     for (const face of faces) {
@@ -314,8 +313,8 @@ export default function RoofSimulator({ insights }: Props) {
         ctx.save();
         ctx.translate(ct.x, ct.y);
         ctx.rotate(-angle);
-        const pwPx = panel.pw / metersPerPixel * scale;
-        const phPx = panel.ph / metersPerPixel * scale;
+        const pwPx = panel.pw / metersPerPixel * imgScale;
+        const phPx = panel.ph / metersPerPixel * imgScale;
         ctx.fillStyle = company.color + "bb";
         ctx.fillRect(0, 0, pwPx, phPx);
         ctx.strokeStyle = company.color;
@@ -342,31 +341,33 @@ export default function RoofSimulator({ insights }: Props) {
     setFaceDetails(details);
 
     // スケールバー
-    const scaleBarM = Math.max(1, Math.round((maxPx - minPx) * metersPerPixel / 4));
-    const scaleBarPx = (scaleBarM / metersPerPixel) * scale;
-    const sbX = W - pad - scaleBarPx;
+    const scaleBarM = Math.max(1, Math.round(imageSize * metersPerPixel / 4));
+    const scaleBarCanvasPx = (scaleBarM / metersPerPixel) * imgScale;
+    const sbX = W - 20 - scaleBarCanvasPx;
     const sbY = H - 16;
-    ctx.strokeStyle = "#ffffff60";
-    ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.moveTo(sbX, sbY); ctx.lineTo(sbX + scaleBarPx, sbY); ctx.stroke();
+    ctx.strokeStyle = "#ffffff90";
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(sbX, sbY); ctx.lineTo(sbX + scaleBarCanvasPx, sbY); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(sbX, sbY - 4); ctx.lineTo(sbX, sbY + 4); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(sbX + scaleBarPx, sbY - 4); ctx.lineTo(sbX + scaleBarPx, sbY + 4); ctx.stroke();
-    ctx.fillStyle = "#ffffff80";
-    ctx.font = "10px sans-serif";
+    ctx.beginPath(); ctx.moveTo(sbX + scaleBarCanvasPx, sbY - 4); ctx.lineTo(sbX + scaleBarCanvasPx, sbY + 4); ctx.stroke();
+    ctx.fillStyle = "#ffffffcc";
+    ctx.font = "bold 11px sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText(`${scaleBarM}m`, sbX + scaleBarPx / 2, sbY - 6);
+    ctx.fillText(`${scaleBarM}m`, sbX + scaleBarCanvasPx / 2, sbY - 6);
     ctx.textAlign = "start";
 
     // 凡例
     ctx.font = "10px sans-serif";
     ctx.strokeStyle = "#ef4444cc"; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.moveTo(12, 16); ctx.lineTo(32, 16); ctx.stroke();
-    ctx.fillStyle = "#ffffffaa"; ctx.textAlign = "start";
+    ctx.fillStyle = "#ffffffee"; ctx.textAlign = "start";
     ctx.fillText("棟", 36, 19);
     ctx.strokeStyle = "#22d3eecc"; ctx.lineWidth = 2; ctx.setLineDash([6, 3]);
     ctx.beginPath(); ctx.moveTo(60, 16); ctx.lineTo(80, 16); ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillText("軒", 84, 19);
+
+    } // drawOverlay end
 
   }, [roofResult, company]);
 
