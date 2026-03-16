@@ -21,13 +21,13 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { lat, lng, zoom = 21 } = await req.json();
+  const { lat, lng, zoom = 20, roofHint } = await req.json();
   if (!lat || !lng) {
     return NextResponse.json({ error: "lat and lng are required" }, { status: 400 });
   }
 
   // 1. Google Maps Static APIで衛星画像を取得
-  const size = 400;
+  const size = 640;
   const staticMapUrl =
     `https://maps.googleapis.com/maps/api/staticmap` +
     `?center=${lat},${lng}&zoom=${zoom}&size=${size}x${size}` +
@@ -51,21 +51,32 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 2. Gemini APIで屋根形状を検出
-  const prompt = `以下の衛星写真の建物屋根を解析し、太陽光パネル設置図面用のデータをJSON形式のみで返してください。
+  // 2. メートル/ピクセル計算
+  const metersPerPixel =
+    (156543.03392 * Math.cos((lat * Math.PI) / 180)) / Math.pow(2, zoom);
+  const imageWidthM = (size * metersPerPixel).toFixed(1);
 
-【検出してほしい情報】
-1. 屋根各面の輪郭ポリゴン（ピクセル座標、画像サイズは${size}x${size}px）
-2. 各面の勾配方向（雨水が流れる方向を0-360度で、北=0）
-3. 棟・軒の識別（どの辺が棟でどの辺が軒か）
-4. 建物全体の主軸角度（度）
+  // 3. Gemini APIで屋根形状を検出
+  void roofHint; // Solar APIヒントは現在未使用（画像優先）
 
-【注意】
-- ridge_edge/eave_edgeはpointsの辺インデックス（0=points[0]-points[1]の辺）
-- 隣接する面は頂点を共有すること
-- 各面は4〜6頂点以内でシンプルに
-- 最大6面まで
-- 返答はJSONのみ。説明文不要`;
+  const prompt = `この衛星写真（${size}x${size}px、実寸約${imageWidthM}m四方）の中央にある建物の屋根を解析してください。
+
+【タスク】
+太陽光パネル設置図面のため、屋根の各面をポリゴンで検出してください。
+
+【検出ルール】
+1. 画像中央の建物の屋根のみを対象とする（隣接建物・影・地面を含めない）
+2. 屋根の稜線（棟線・谷線）で面を分割し、各傾斜面を別ポリゴンで返す
+3. 座標はピクセル座標（左上原点、右X+、下Y+）
+4. 各ポリゴンは4〜8頂点（実際の形状に忠実に、シンプル化しすぎない）
+5. 隣接面は頂点を共有させる
+6. slope_directionは雨水が流れ落ちる方向（北=0、東=90、南=180、西=270）
+7. 画像を注意深く観察し、屋根の色の濃淡・影の方向から各面の傾斜方向を判断すること
+
+【重要：画像を優先すること】
+- 事前情報より画像に写っている実際の形状を優先してください
+- この建物は複合屋根（寄棟＋切妻の組み合わせ）の可能性があります
+- 屋根面の境界線（稜線）を画像から丁寧にトレースしてください`;
 
   const responseSchema = {
     type: "OBJECT" as const,
@@ -93,7 +104,6 @@ export async function POST(req: NextRequest) {
               type: "ARRAY" as const,
               items: { type: "NUMBER" as const },
             },
-            area_m2: { type: "NUMBER" as const },
           },
           required: ["id", "points", "slope_direction"],
         },
@@ -120,11 +130,10 @@ export async function POST(req: NextRequest) {
       },
     ],
     generationConfig: {
-      temperature: 0.1,
+      temperature: 0.2,
       maxOutputTokens: 8192,
       responseMimeType: "application/json",
       responseSchema,
-      thinkingConfig: { thinkingBudget: 0 },
     },
   };
 
@@ -134,7 +143,6 @@ export async function POST(req: NextRequest) {
     slope_direction: number;
     ridge_edge?: number[];
     eave_edge?: number[];
-    area_m2?: number;
   }
   interface RoofData {
     building_angle: number;
@@ -183,23 +191,33 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 3. ピクセル座標をメートル座標に変換
-  const metersPerPixel =
-    (156543.03392 * Math.cos((lat * Math.PI) / 180)) / Math.pow(2, zoom);
-
+  // 4. ピクセル座標をメートル座標に変換
   const centerPx = size / 2;
 
-  const faces = roofData.faces.map((face) => ({
-    id: face.id,
-    points: face.points.map((p) => ({
+  const faces = roofData.faces.map((face) => {
+    const meterPoints = face.points.map((p) => ({
       x: (p[0] - centerPx) * metersPerPixel,
       y: (p[1] - centerPx) * metersPerPixel,
-    })),
-    slope_direction: face.slope_direction,
-    ridge_edge: face.ridge_edge,
-    eave_edge: face.eave_edge,
-    area_m2: face.area_m2,
-  }));
+    }));
+
+    // ポリゴン面積を計算 (Shoelace formula)
+    let area = 0;
+    for (let i = 0; i < meterPoints.length; i++) {
+      const j = (i + 1) % meterPoints.length;
+      area += meterPoints[i].x * meterPoints[j].y;
+      area -= meterPoints[j].x * meterPoints[i].y;
+    }
+    area = Math.abs(area) / 2;
+
+    return {
+      id: face.id,
+      points: meterPoints,
+      slope_direction: face.slope_direction,
+      ridge_edge: face.ridge_edge,
+      eave_edge: face.eave_edge,
+      area_m2: area,
+    };
+  });
 
   return NextResponse.json({
     building_angle: roofData.building_angle,

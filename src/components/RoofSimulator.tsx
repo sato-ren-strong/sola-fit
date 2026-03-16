@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { BuildingInsights } from "@/types/solar";
 import { COMPANIES } from "@/lib/companies";
 
@@ -9,114 +9,26 @@ interface Point {
   y: number;
 }
 
+interface RoofFace {
+  id: string;
+  points: Point[];
+  slope_direction: number;
+  ridge_edge?: number[];
+  eave_edge?: number[];
+  area_m2: number;
+}
+
+interface RoofDetectResult {
+  building_angle: number;
+  faces: RoofFace[];
+  metersPerPixel: number;
+}
+
 interface Props {
   insights: BuildingInsights;
 }
 
-// --- 座標変換 ---
-function latLngToMeters(
-  lat: number, lng: number, cLat: number, cLng: number
-): Point {
-  const mPerLat = 111320;
-  const mPerLng = 111320 * Math.cos((cLat * Math.PI) / 180);
-  return {
-    x: (lng - cLng) * mPerLng,
-    y: -((lat - cLat) * mPerLat), // Y軸反転（Canvas用）
-  };
-}
-
-// --- 凸包 (Graham scan) ---
-function convexHull(points: Point[]): Point[] {
-  if (points.length < 3) return [...points];
-  const pts = [...points].sort((a, b) => a.x - b.x || a.y - b.y);
-  const cross = (o: Point, a: Point, b: Point) =>
-    (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-  const lower: Point[] = [];
-  for (const p of pts) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0)
-      lower.pop();
-    lower.push(p);
-  }
-  const upper: Point[] = [];
-  for (let i = pts.length - 1; i >= 0; i--) {
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pts[i]) <= 0)
-      upper.pop();
-    upper.push(pts[i]);
-  }
-  lower.pop();
-  upper.pop();
-  return lower.concat(upper);
-}
-
-// --- 最小面積外接矩形 (Rotating Calipers) ---
-function minAreaRect(points: Point[]): Point[] {
-  const hull = convexHull(points);
-  if (hull.length < 2) return hull;
-  if (hull.length === 2) {
-    const [a, b] = hull;
-    return [a, b, b, a]; // 退化ケース
-  }
-
-  let bestArea = Infinity;
-  let bestRect: Point[] = [];
-
-  for (let i = 0; i < hull.length; i++) {
-    const j = (i + 1) % hull.length;
-    // この辺の方向ベクトル
-    const dx = hull[j].x - hull[i].x;
-    const dy = hull[j].y - hull[i].y;
-    const len = Math.sqrt(dx * dx + dy * dy);
-    if (len === 0) continue;
-
-    // 単位ベクトル（辺方向とその法線）
-    const ux = dx / len, uy = dy / len;
-    const vx = -uy, vy = ux;
-
-    // 全点を(u,v)座標に射影
-    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
-    for (const p of hull) {
-      const pu = p.x * ux + p.y * uy;
-      const pv = p.x * vx + p.y * vy;
-      if (pu < minU) minU = pu;
-      if (pu > maxU) maxU = pu;
-      if (pv < minV) minV = pv;
-      if (pv > maxV) maxV = pv;
-    }
-
-    const area = (maxU - minU) * (maxV - minV);
-    if (area < bestArea) {
-      bestArea = area;
-      // (u,v)座標の4隅をワールド座標に戻す
-      bestRect = [
-        { x: minU * ux + minV * vx, y: minU * uy + minV * vy },
-        { x: maxU * ux + minV * vx, y: maxU * uy + minV * vy },
-        { x: maxU * ux + maxV * vx, y: maxU * uy + maxV * vy },
-        { x: minU * ux + maxV * vx, y: minU * uy + maxV * vy },
-      ];
-    }
-  }
-
-  return bestRect;
-}
-
-// --- ポリゴンの辺の長さ ---
-function edgeLength(a: Point, b: Point): number {
-  return Math.sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2);
-}
-
-// --- 矩形の幅と高さ（短辺・長辺）---
-function rectDimensions(rect: Point[]): { width: number; height: number; angle: number } {
-  const e0 = edgeLength(rect[0], rect[1]);
-  const e1 = edgeLength(rect[1], rect[2]);
-  const longEdge = Math.max(e0, e1);
-  const shortEdge = Math.min(e0, e1);
-  // 長辺の角度
-  const ref = e0 >= e1 ? [rect[0], rect[1]] : [rect[1], rect[2]];
-  const angle = Math.atan2(ref[1].y - ref[0].y, ref[1].x - ref[0].x);
-  return { width: longEdge, height: shortEdge, angle };
-}
-
-// --- 点がポリゴン内部にあるか (ray casting) ---
+// 点がポリゴン内部にあるか (ray casting)
 function pointInPolygon(p: Point, polygon: Point[]): boolean {
   let inside = false;
   for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
@@ -129,7 +41,7 @@ function pointInPolygon(p: Point, polygon: Point[]): boolean {
   return inside;
 }
 
-// --- ポリゴンを内側にオフセット ---
+// ポリゴンを内側にオフセット
 function shrinkPolygon(polygon: Point[], amount: number): Point[] {
   if (polygon.length < 3) return polygon;
   const cx = polygon.reduce((s, p) => s + p.x, 0) / polygon.length;
@@ -144,8 +56,8 @@ function shrinkPolygon(polygon: Point[], amount: number): Point[] {
   });
 }
 
-// --- 方位角 → 色 ---
-function azimuthColor(deg: number): string {
+// 勾配方向(0-360) → 色
+function slopeColor(deg: number): string {
   const d = ((deg % 360) + 360) % 360;
   if (d >= 135 && d <= 225) return "#f59e0b"; // 南
   if (d >= 45 && d < 135) return "#3b82f6";   // 東
@@ -153,8 +65,8 @@ function azimuthColor(deg: number): string {
   return "#6b7280";                            // 北
 }
 
-// --- 方位角 → ラベル ---
-function azimuthLabel(deg: number): string {
+// 勾配方向 → ラベル
+function slopeLabel(deg: number): string {
   const d = ((deg % 360) + 360) % 360;
   if (d >= 157.5 && d <= 202.5) return "南";
   if (d > 202.5 && d <= 247.5) return "南西";
@@ -166,97 +78,95 @@ function azimuthLabel(deg: number): string {
   return "南東";
 }
 
-interface RoofFace {
-  rect: Point[];        // 回転外接矩形（4頂点、メートル座標）
-  azimuth: number;
-  pitch: number;
-  areaM2: number;
-  widthM: number;
-  heightM: number;
-  angle: number;        // 矩形の回転角（ラジアン）
-  panelPoints: Point[]; // 元のパネル位置（デバッグ用）
+// ポリゴンの主軸角度を求める（長辺の角度）
+function polygonAngle(polygon: Point[]): number {
+  let maxDist = 0;
+  let angle = 0;
+  for (let i = 0; i < polygon.length; i++) {
+    const j = (i + 1) % polygon.length;
+    const dx = polygon[j].x - polygon[i].x;
+    const dy = polygon[j].y - polygon[i].y;
+    const dist = dx * dx + dy * dy;
+    if (dist > maxDist) {
+      maxDist = dist;
+      angle = Math.atan2(dy, dx);
+    }
+  }
+  return angle;
+}
+
+// 辺の長さ
+function edgeLength(a: Point, b: Point): number {
+  return Math.sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2);
 }
 
 export default function RoofSimulator({ insights }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [selectedId, setSelectedId] = useState(COMPANIES[0].id);
   const [panelCount, setPanelCount] = useState(0);
-  const [faceDetails, setFaceDetails] = useState<{ label: string; count: number; color: string; widthM: number; heightM: number }[]>([]);
-  const [faces, setFaces] = useState<RoofFace[]>([]);
+  const [faceDetails, setFaceDetails] = useState<{ label: string; count: number; color: string; areaM2: number }[]>([]);
+  const [roofResult, setRoofResult] = useState<RoofDetectResult | null>(null);
+  const [detecting, setDetecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const company = COMPANIES.find((c) => c.id === selectedId)!;
 
-  // Solar APIデータから屋根面を構築
-  useEffect(() => {
-    const { roofSegmentStats, solarPanels } = insights.solarPotential;
-    const { latitude: cLat, longitude: cLng } = insights.center;
+  // Geminiで屋根形状を検出
+  const detectRoof = useCallback(async () => {
+    setDetecting(true);
+    setError(null);
+    try {
+      const { latitude: lat, longitude: lng } = insights.center;
 
-    if (!roofSegmentStats || !solarPanels || solarPanels.length === 0) return;
+      // Solar APIデータからヒント情報を生成
+      const segs = insights.solarPotential.roofSegmentStats;
+      const directions = segs
+        .map((s) => `${slopeLabel(s.azimuthDegrees)}(${s.stats.areaMeters2.toFixed(0)}m²)`)
+        .join(", ");
+      const roofHint = {
+        totalAreaM2: segs.reduce((s, seg) => s + seg.stats.groundAreaMeters2, 0).toFixed(0),
+        segmentCount: segs.length,
+        directions,
+      };
 
-    // パネルをセグメントごとにグループ化
-    const segMap = new Map<number, Point[]>();
-    const apiPanelW = insights.solarPotential.panelWidthMeters;
-    const apiPanelH = insights.solarPotential.panelHeightMeters;
-
-    for (const panel of solarPanels) {
-      const center = latLngToMeters(
-        panel.center.latitude, panel.center.longitude, cLat, cLng
-      );
-      // パネル4隅を追加（回転考慮なしだが、外接矩形の精度向上に寄与）
-      const hw = (panel.orientation === "LANDSCAPE" ? apiPanelH : apiPanelW) / 2;
-      const hh = (panel.orientation === "LANDSCAPE" ? apiPanelW : apiPanelH) / 2;
-      const corners: Point[] = [
-        { x: center.x - hw, y: center.y - hh },
-        { x: center.x + hw, y: center.y - hh },
-        { x: center.x + hw, y: center.y + hh },
-        { x: center.x - hw, y: center.y + hh },
-      ];
-      const idx = panel.segmentIndex;
-      if (!segMap.has(idx)) segMap.set(idx, []);
-      segMap.get(idx)!.push(...corners);
-    }
-
-    // 各セグメントの回転最小外接矩形を計算
-    const result: RoofFace[] = [];
-    for (const [segIdx, points] of segMap) {
-      if (points.length < 3) continue;
-      const seg = roofSegmentStats[segIdx];
-      if (!seg) continue;
-
-      const rect = minAreaRect(points);
-      if (rect.length < 4) continue;
-
-      const dims = rectDimensions(rect);
-
-      result.push({
-        rect,
-        azimuth: seg.azimuthDegrees,
-        pitch: seg.pitchDegrees,
-        areaM2: seg.stats.areaMeters2,
-        widthM: dims.width,
-        heightM: dims.height,
-        angle: dims.angle,
-        panelPoints: points,
+      const res = await fetch("/api/roof-detect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lat, lng, zoom: 20, roofHint }),
       });
+      if (!res.ok) {
+        const body = await res.json();
+        throw new Error(`${body.error ?? `HTTP ${res.status}`}${body.detail ? ` (${body.detail})` : ""}`);
+      }
+      const data = await res.json();
+      setRoofResult(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "屋根検出に失敗しました");
+    } finally {
+      setDetecting(false);
     }
-
-    setFaces(result);
   }, [insights]);
+
+  // 初回自動検出
+  useEffect(() => {
+    detectRoof();
+  }, [detectRoof]);
 
   // Canvas描画
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || faces.length === 0) return;
+    if (!canvas || !roofResult || roofResult.faces.length === 0) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
+    const { faces } = roofResult;
     const W = canvas.width;
     const H = canvas.height;
 
     // 全体の範囲
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     for (const face of faces) {
-      for (const p of face.rect) {
+      for (const p of face.points) {
         if (p.x < minX) minX = p.x;
         if (p.x > maxX) maxX = p.x;
         if (p.y < minY) minY = p.y;
@@ -302,8 +212,8 @@ export default function RoofSimulator({ insights }: Props) {
 
     // 屋根面を描画
     for (const face of faces) {
-      const color = azimuthColor(face.azimuth);
-      const canvasPoly = face.rect.map(toCanvas);
+      const color = slopeColor(face.slope_direction);
+      const canvasPoly = face.points.map(toCanvas);
 
       // 塗りつぶし
       ctx.beginPath();
@@ -318,20 +228,48 @@ export default function RoofSimulator({ insights }: Props) {
       ctx.lineWidth = 2;
       ctx.stroke();
 
-      // 寸法線
-      for (let i = 0; i < 2; i++) {
-        const p1 = canvasPoly[i];
-        const p2 = canvasPoly[i + 1];
-        const len = edgeLength(face.rect[i], face.rect[i + 1]);
-        const mx = (p1.x + p2.x) / 2;
-        const my = (p1.y + p2.y) / 2;
-        // 辺の法線方向にオフセット
-        const dx = p2.x - p1.x, dy = p2.y - p1.y;
-        const nl = Math.sqrt(dx * dx + dy * dy) || 1;
-        const nx = -dy / nl * 14, ny = dx / nl * 14;
+      // 棟線（ridge）を赤太線で
+      if (face.ridge_edge && face.ridge_edge.length > 0) {
+        ctx.strokeStyle = "#ef4444cc";
+        ctx.lineWidth = 3;
+        for (const edgeIdx of face.ridge_edge) {
+          const p1 = canvasPoly[edgeIdx];
+          const p2 = canvasPoly[(edgeIdx + 1) % canvasPoly.length];
+          if (p1 && p2) {
+            ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+          }
+        }
+      }
 
-        ctx.fillStyle = "#ffffffbb";
-        ctx.font = "bold 10px sans-serif";
+      // 軒線（eave）をシアン破線で
+      if (face.eave_edge && face.eave_edge.length > 0) {
+        ctx.strokeStyle = "#22d3eecc";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 3]);
+        for (const edgeIdx of face.eave_edge) {
+          const p1 = canvasPoly[edgeIdx];
+          const p2 = canvasPoly[(edgeIdx + 1) % canvasPoly.length];
+          if (p1 && p2) {
+            ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+          }
+        }
+        ctx.setLineDash([]);
+      }
+
+      // 寸法線（各辺に長さを表示）
+      for (let i = 0; i < canvasPoly.length; i++) {
+        const j = (i + 1) % canvasPoly.length;
+        const len = edgeLength(face.points[i], face.points[j]);
+        if (len < 0.5) continue; // 短すぎる辺はスキップ
+        const mx = (canvasPoly[i].x + canvasPoly[j].x) / 2;
+        const my = (canvasPoly[i].y + canvasPoly[j].y) / 2;
+        const dx = canvasPoly[j].x - canvasPoly[i].x;
+        const dy = canvasPoly[j].y - canvasPoly[i].y;
+        const nl = Math.sqrt(dx * dx + dy * dy) || 1;
+        const nx = -dy / nl * 12, ny = dx / nl * 12;
+
+        ctx.fillStyle = "#ffffff99";
+        ctx.font = "9px sans-serif";
         ctx.textAlign = "center";
         ctx.fillText(`${len.toFixed(1)}m`, mx + nx, my + ny + 3);
       }
@@ -343,36 +281,33 @@ export default function RoofSimulator({ insights }: Props) {
       ctx.fillStyle = color + "ee";
       ctx.font = "bold 12px sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText(`${azimuthLabel(face.azimuth)}面`, cx, cy - 6);
+      ctx.fillText(`${slopeLabel(face.slope_direction)}面`, cx, cy - 4);
       ctx.font = "10px sans-serif";
       ctx.fillStyle = color + "aa";
-      ctx.fillText(`${face.areaM2.toFixed(1)}m² / 傾斜${face.pitch.toFixed(0)}°`, cx, cy + 8);
+      ctx.fillText(`${face.area_m2.toFixed(1)}m²`, cx, cy + 10);
       ctx.textAlign = "start";
     }
 
-    // パネル敷き詰め（矩形の回転角に合わせて配置）
+    // パネル敷き詰め（各面の主軸に沿って回転配置）
     const pW = company.panelWidthM;
     const pH = company.panelHeightM;
     const gap = 0.05;
 
     let totalCount = 0;
-    const details: { label: string; count: number; color: string; widthM: number; heightM: number }[] = [];
+    const details: { label: string; count: number; color: string; areaM2: number }[] = [];
 
     for (const face of faces) {
-      const shrunk = shrinkPolygon(face.rect, 0.25);
-      const color = azimuthColor(face.azimuth);
-
-      // 矩形の回転角に沿ってパネルを配置
-      const angle = face.angle;
+      const shrunk = shrinkPolygon(face.points, 0.25);
+      const angle = polygonAngle(face.points);
       const cosA = Math.cos(angle), sinA = Math.sin(angle);
 
-      // shrunkポリゴンを回転座標系に変換してバウンディング取得
-      const cx = shrunk.reduce((s, p) => s + p.x, 0) / shrunk.length;
-      const cy = shrunk.reduce((s, p) => s + p.y, 0) / shrunk.length;
+      // shrunkポリゴンを回転座標系に変換
+      const fcx = shrunk.reduce((s, p) => s + p.x, 0) / shrunk.length;
+      const fcy = shrunk.reduce((s, p) => s + p.y, 0) / shrunk.length;
 
       const rotated = shrunk.map(p => ({
-        x: (p.x - cx) * cosA + (p.y - cy) * sinA,
-        y: -(p.x - cx) * sinA + (p.y - cy) * cosA,
+        x: (p.x - fcx) * cosA + (p.y - fcy) * sinA,
+        y: -(p.x - fcx) * sinA + (p.y - fcy) * cosA,
       }));
 
       let rMinX = Infinity, rMaxX = -Infinity, rMinY = Infinity, rMaxY = -Infinity;
@@ -383,39 +318,29 @@ export default function RoofSimulator({ insights }: Props) {
         if (p.y > rMaxY) rMaxY = p.y;
       }
 
-      let faceCount = 0;
-
-      // 縦置きと横置き両方試して多い方を採用
-      const orientations: [number, number][] = [[pW, pH], [pH, pW]];
+      // 縦置き・横置き両方試す
       let bestCount = 0;
-      let bestPanels: { tl: Point; br: Point }[] = [];
+      let bestPanels: Point[] = [];
+      let bestPw = pW, bestPh = pH;
 
-      for (const [pw, ph] of orientations) {
+      for (const [pw, ph] of [[pW, pH], [pH, pW]] as [number, number][]) {
         let count = 0;
-        const panels: { tl: Point; br: Point }[] = [];
+        const panels: Point[] = [];
 
         for (let lx = rMinX; lx + pw <= rMaxX; lx += pw + gap) {
           for (let ly = rMinY; ly + ph <= rMaxY; ly += ph + gap) {
-            // 4隅を回転座標系で生成
-            const localCorners = [
+            const corners = [
               { x: lx, y: ly },
               { x: lx + pw, y: ly },
               { x: lx + pw, y: ly + ph },
               { x: lx, y: ly + ph },
             ];
-            // 回転座標系のまま shrunk ポリゴン内判定
-            if (!localCorners.every(c => pointInPolygon(c, rotated))) continue;
+            if (!corners.every(c => pointInPolygon(c, rotated))) continue;
 
-            // ワールド座標に戻してCanvas描画用に変換
-            const worldTl = {
-              x: lx * cosA - ly * sinA + cx,
-              y: lx * sinA + ly * cosA + cy,
-            };
-            const worldBr = {
-              x: (lx + pw) * cosA - (ly + ph) * sinA + cx,
-              y: (lx + pw) * sinA + (ly + ph) * cosA + cy,
-            };
-            panels.push({ tl: worldTl, br: worldBr });
+            // ワールド座標に戻す（tl位置のみ）
+            const wx = lx * cosA - ly * sinA + fcx;
+            const wy = lx * sinA + ly * cosA + fcy;
+            panels.push({ x: wx, y: wy });
             count++;
           }
         }
@@ -423,44 +348,42 @@ export default function RoofSimulator({ insights }: Props) {
         if (count > bestCount) {
           bestCount = count;
           bestPanels = panels;
+          bestPw = pw;
+          bestPh = ph;
         }
       }
 
-      // パネル描画（回転矩形として描画）
-      for (const panel of bestPanels) {
-        const ct = toCanvas(panel.tl);
+      // パネル描画
+      for (const tl of bestPanels) {
+        const ct = toCanvas(tl);
         ctx.save();
         ctx.translate(ct.x, ct.y);
-        ctx.rotate(-face.angle);
-        const pw_px = pW * scale;
-        const ph_px = pH * scale;
+        ctx.rotate(-angle);
+        const pwPx = bestPw * scale;
+        const phPx = bestPh * scale;
         ctx.fillStyle = company.color + "bb";
-        ctx.fillRect(0, 0, pw_px, ph_px);
+        ctx.fillRect(0, 0, pwPx, phPx);
         ctx.strokeStyle = company.color;
         ctx.lineWidth = 0.5;
-        ctx.strokeRect(0, 0, pw_px, ph_px);
-        // セル線
+        ctx.strokeRect(0, 0, pwPx, phPx);
         ctx.strokeStyle = company.color + "40";
         ctx.lineWidth = 0.3;
         ctx.beginPath();
-        ctx.moveTo(pw_px / 2, 0);
-        ctx.lineTo(pw_px / 2, ph_px);
+        ctx.moveTo(pwPx / 2, 0);
+        ctx.lineTo(pwPx / 2, phPx);
         ctx.stroke();
         ctx.restore();
       }
 
-      faceCount = bestCount;
-
-      if (faceCount > 0) {
+      if (bestCount > 0) {
         details.push({
-          label: `${azimuthLabel(face.azimuth)}面`,
-          count: faceCount,
-          color,
-          widthM: face.widthM,
-          heightM: face.heightM,
+          label: `${slopeLabel(face.slope_direction)}面`,
+          count: bestCount,
+          color: slopeColor(face.slope_direction),
+          areaM2: face.area_m2,
         });
       }
-      totalCount += faceCount;
+      totalCount += bestCount;
     }
 
     setPanelCount(totalCount);
@@ -482,7 +405,23 @@ export default function RoofSimulator({ insights }: Props) {
     ctx.fillText(`${scaleBarM}m`, sbX + scaleBarPx / 2, sbY - 6);
     ctx.textAlign = "start";
 
-  }, [faces, company]);
+    // 凡例
+    const legY = 16;
+    ctx.font = "10px sans-serif";
+    ctx.strokeStyle = "#ef4444cc";
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(12, legY); ctx.lineTo(32, legY); ctx.stroke();
+    ctx.fillStyle = "#ffffffaa";
+    ctx.textAlign = "start";
+    ctx.fillText("棟", 36, legY + 3);
+    ctx.strokeStyle = "#22d3eecc";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 3]);
+    ctx.beginPath(); ctx.moveTo(60, legY); ctx.lineTo(80, legY); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillText("軒", 84, legY + 3);
+
+  }, [roofResult, company]);
 
   const totalKw = (panelCount * company.panelWatts) / 1000;
 
@@ -519,15 +458,33 @@ export default function RoofSimulator({ insights }: Props) {
             {item.label}
           </span>
         ))}
-        <span className="text-gray-500">屋根面 {faces.length} 面検出</span>
       </div>
 
       {/* Canvas */}
       <div className="bg-slate-900 rounded-xl overflow-hidden relative">
+        {detecting && (
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-slate-900/90">
+            <div className="w-12 h-12 rounded-full border-4 border-emerald-400/30 border-t-emerald-400 animate-spin" />
+            <p className="text-white/70 text-sm mt-3">Gemini が屋根形状を解析中...</p>
+          </div>
+        )}
+
+        {error && (
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-slate-900/90 gap-3 px-6">
+            <p className="text-red-400 text-sm text-center break-all">{error}</p>
+            <button
+              onClick={detectRoof}
+              className="text-sm bg-white/10 hover:bg-white/20 px-4 py-2 rounded-xl transition-colors text-white"
+            >
+              再試行
+            </button>
+          </div>
+        )}
+
         <canvas ref={canvasRef} width={800} height={500} className="w-full h-auto" />
 
         {/* パネル情報オーバーレイ */}
-        {faces.length > 0 && (
+        {roofResult && roofResult.faces.length > 0 && (
           <div className="absolute top-3 right-3 bg-black/80 backdrop-blur text-white text-xs px-4 py-3 rounded-lg space-y-1.5 min-w-[180px]">
             <div className="font-bold text-sm" style={{ color: company.color }}>{company.name}</div>
             <div className="text-white/60">{company.modelName}</div>
@@ -548,20 +505,30 @@ export default function RoofSimulator({ insights }: Props) {
                       <span style={{ color: d.color }}>{d.label}</span>
                       <span>{d.count}枚</span>
                     </div>
-                    <div className="text-white/40 text-[10px]">
-                      {d.widthM.toFixed(1)} x {d.heightM.toFixed(1)} m
-                    </div>
+                    <div className="text-white/40 text-[10px]">{d.areaM2.toFixed(1)}m²</div>
                   </div>
                 ))}
               </div>
             )}
+            <div className="border-t border-white/10 pt-1.5 mt-1.5 text-white/40">
+              建物角度: {roofResult.building_angle}°
+            </div>
           </div>
         )}
       </div>
 
-      <p className="text-xs text-gray-400">
-        ※ Solar APIのパネル配置データから回転最小外接矩形で屋根面を推定。実寸メートル座標で各社パネルを配置しています。
-      </p>
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-gray-400">
+          ※ Gemini AIが衛星写真から屋根形状を検出。棟/軒を識別し各社パネルを配置した参考シミュレーションです。
+        </p>
+        <button
+          onClick={detectRoof}
+          disabled={detecting}
+          className="text-xs text-emerald-400 hover:text-emerald-300 transition-colors disabled:opacity-50 whitespace-nowrap ml-2"
+        >
+          再検出
+        </button>
+      </div>
     </div>
   );
 }
