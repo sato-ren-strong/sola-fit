@@ -6,6 +6,7 @@ import { BuildingInsights } from "@/types/solar";
 
 const SolarMap = dynamic(() => import("@/components/SolarMap"), { ssr: false });
 const CompanyCards = dynamic(() => import("@/components/CompanyCards"), { ssr: false });
+const RoofSimulator = dynamic(() => import("@/components/RoofSimulator"), { ssr: false });
 
 type Status = "idle" | "locating" | "fetching" | "done" | "error";
 
@@ -218,6 +219,18 @@ export default function ClientPage({ mapsApiKey }: Props) {
               <SolarMap insights={insights} apiKey={mapsApiKey} />
             </div>
 
+            {/* Roof simulator */}
+            <div>
+              <h3 className="font-bold text-lg mb-4 flex items-center gap-2">
+                <span className="text-emerald-400">🏠</span>
+                屋根シミュレーター
+              </h3>
+              <div className="bg-slate-800 border border-white/10 rounded-2xl p-5 shadow-xl">
+                <RoofSimulator insights={insights} />
+              </div>
+            </div>
+
+            {/* Company cards */}
             <div>
               <h3 className="font-bold text-lg mb-4 flex items-center gap-2">
                 <span className="text-emerald-400">⚡</span>

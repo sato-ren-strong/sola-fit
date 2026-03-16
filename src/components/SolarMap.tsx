@@ -9,25 +9,9 @@ interface Props {
   apiKey: string;
 }
 
-// Map sunshine (kWh/kW/year) to a color: blue → green → yellow → red
-function sunshineColor(value: number, min: number, max: number): string {
-  const t = Math.max(0, Math.min(1, (value - min) / (max - min || 1)));
-  if (t < 0.5) {
-    const s = t / 0.5;
-    const r = Math.round(s * 255);
-    const g = Math.round(s * 200);
-    return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}ff`;
-  } else {
-    const s = (t - 0.5) / 0.5;
-    const g = Math.round((1 - s) * 200);
-    const b = Math.round((1 - s) * 255);
-    return `#ff${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
-  }
-}
-
 export default function SolarMap({ insights, apiKey }: Props) {
   const mapRef = useRef<HTMLDivElement>(null);
-  const overlaysRef = useRef<(google.maps.Polygon | google.maps.Rectangle)[]>([]);
+  const overlaysRef = useRef<google.maps.Polygon[]>([]);
 
   useEffect(() => {
     if (!mapRef.current) return;
@@ -51,39 +35,8 @@ export default function SolarMap({ insights, apiKey }: Props) {
       overlaysRef.current.forEach((p) => p.setMap(null));
       overlaysRef.current = [];
 
-      const { solarPotential } = insights;
-      const { roofSegmentStats, solarPanels, panelHeightMeters, panelWidthMeters } = solarPotential;
+      const { solarPanels, panelHeightMeters, panelWidthMeters } = insights.solarPotential;
 
-      // --- Roof segments colored by sunshine ---
-      const sunshineValues = roofSegmentStats
-        .map((seg) => seg.stats.sunshineQuantiles?.[5] ?? 0)
-        .filter((v) => v > 0);
-      const minSun = Math.min(...sunshineValues);
-      const maxSun = Math.max(...sunshineValues);
-
-      roofSegmentStats.forEach((seg) => {
-        const { sw, ne } = seg.boundingBox;
-        const sunshine = seg.stats.sunshineQuantiles?.[5] ?? 0;
-        const color = sunshineColor(sunshine, minSun, maxSun);
-
-        const rect = new google.maps.Rectangle({
-          bounds: {
-            south: sw.latitude,
-            west: sw.longitude,
-            north: ne.latitude,
-            east: ne.longitude,
-          },
-          strokeColor: color,
-          strokeOpacity: 0.9,
-          strokeWeight: 2,
-          fillColor: color,
-          fillOpacity: 0.35,
-          map,
-        });
-        overlaysRef.current.push(rect);
-      });
-
-      // --- Individual panel rectangles ---
       solarPanels.forEach((panel) => {
         const { latitude: pLat, longitude: pLng } = panel.center;
         const metersPerDegreeLat = 111320;
@@ -111,7 +64,6 @@ export default function SolarMap({ insights, apiKey }: Props) {
         overlaysRef.current.push(polygon);
       });
 
-      // Center marker
       new google.maps.Marker({
         position: { lat: latitude, lng: longitude },
         map,
@@ -128,10 +80,6 @@ export default function SolarMap({ insights, apiKey }: Props) {
   }, [insights, apiKey]);
 
   return (
-    <div
-      ref={mapRef}
-      className="w-full rounded-xl overflow-hidden"
-      style={{ height: "380px" }}
-    />
+    <div ref={mapRef} className="w-full rounded-xl overflow-hidden" style={{ height: "380px" }} />
   );
 }
