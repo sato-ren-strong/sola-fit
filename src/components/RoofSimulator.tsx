@@ -80,7 +80,7 @@ export default function RoofSimulator({ insights }: Props) {
       });
       if (!res.ok) {
         const body = await res.json();
-        throw new Error(body.error ?? `HTTP ${res.status}`);
+        throw new Error(`${body.error ?? `HTTP ${res.status}`}${body.detail ? ` (${body.detail})` : ""}`);
       }
       const data = await res.json();
       setRoofSegments(data.segments);

@@ -1,11 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 
+// Edge Runtime互換のbase64エンコード
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
 export async function POST(req: NextRequest) {
   const geminiKey = process.env.GEMINI_API_KEY;
   const mapsKey = process.env.GOOGLE_MAPS_API_KEY;
 
   if (!geminiKey || !mapsKey) {
-    return NextResponse.json({ error: "API keys not configured" }, { status: 500 });
+    return NextResponse.json(
+      { error: "API keys not configured", detail: `gemini=${!!geminiKey}, maps=${!!mapsKey}` },
+      { status: 500 }
+    );
   }
 
   const { lat, lng, zoom = 21 } = await req.json();
@@ -14,19 +27,29 @@ export async function POST(req: NextRequest) {
   }
 
   // 1. Google Maps Static APIで衛星画像を取得
-  const size = 640;
+  const size = 400;
   const staticMapUrl =
     `https://maps.googleapis.com/maps/api/staticmap` +
     `?center=${lat},${lng}&zoom=${zoom}&size=${size}x${size}` +
     `&maptype=satellite&key=${mapsKey}`;
 
-  const imgRes = await fetch(staticMapUrl);
-  if (!imgRes.ok) {
-    return NextResponse.json({ error: "Failed to fetch satellite image" }, { status: 502 });
+  let imgBase64: string;
+  try {
+    const imgRes = await fetch(staticMapUrl);
+    if (!imgRes.ok) {
+      return NextResponse.json(
+        { error: "Failed to fetch satellite image", detail: `status=${imgRes.status}` },
+        { status: 502 }
+      );
+    }
+    const imgBuffer = await imgRes.arrayBuffer();
+    imgBase64 = arrayBufferToBase64(imgBuffer);
+  } catch (e) {
+    return NextResponse.json(
+      { error: "Failed to fetch satellite image", detail: String(e) },
+      { status: 502 }
+    );
   }
-
-  const imgBuffer = await imgRes.arrayBuffer();
-  const imgBase64 = Buffer.from(imgBuffer).toString("base64");
 
   // 2. Gemini APIで屋根形状を検出
   const prompt = `この衛星写真の中央にある建物の屋根の形状を検出してください。
@@ -35,38 +58,38 @@ export async function POST(req: NextRequest) {
 各セグメントに推定される方位を含めてください。`;
 
   const responseSchema = {
-    type: "OBJECT",
+    type: "OBJECT" as const,
     properties: {
       segments: {
-        type: "ARRAY",
+        type: "ARRAY" as const,
         items: {
-          type: "OBJECT",
+          type: "OBJECT" as const,
           properties: {
             points: {
-              type: "ARRAY",
+              type: "ARRAY" as const,
               items: {
-                type: "OBJECT",
+                type: "OBJECT" as const,
                 properties: {
-                  x: { type: "NUMBER" },
-                  y: { type: "NUMBER" },
+                  x: { type: "NUMBER" as const },
+                  y: { type: "NUMBER" as const },
                 },
                 required: ["x", "y"],
               },
             },
             direction: {
-              type: "STRING",
+              type: "STRING" as const,
               enum: ["north", "south", "east", "west", "southeast", "southwest", "northeast", "northwest"],
             },
-            label: { type: "STRING" },
+            label: { type: "STRING" as const },
           },
           required: ["points", "direction", "label"],
         },
       },
       building_center: {
-        type: "OBJECT",
+        type: "OBJECT" as const,
         properties: {
-          x: { type: "NUMBER" },
-          y: { type: "NUMBER" },
+          x: { type: "NUMBER" as const },
+          y: { type: "NUMBER" as const },
         },
         required: ["x", "y"],
       },
@@ -75,7 +98,7 @@ export async function POST(req: NextRequest) {
   };
 
   const geminiUrl =
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`;
 
   const geminiBody = {
     contents: [
@@ -99,11 +122,13 @@ export async function POST(req: NextRequest) {
     },
   };
 
-  // リトライ（最大2回）
-  let roofData: { segments: { points: { x: number; y: number }[]; direction: string; label: string }[]; building_center: { x: number; y: number } } | null = null;
-  let lastError = "";
+  interface RoofPoint { x: number; y: number }
+  interface RoofSegment { points: RoofPoint[]; direction: string; label: string }
+  interface RoofData { segments: RoofSegment[]; building_center: RoofPoint }
 
-  for (let attempt = 0; attempt < 2; attempt++) {
+  let roofData: RoofData;
+
+  try {
     const geminiRes = await fetch(geminiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -111,50 +136,56 @@ export async function POST(req: NextRequest) {
     });
 
     if (!geminiRes.ok) {
-      lastError = `Gemini API error: ${geminiRes.status} - ${await geminiRes.text()}`;
-      continue;
+      const errText = await geminiRes.text();
+      return NextResponse.json(
+        { error: "Gemini API error", detail: `${geminiRes.status}: ${errText.slice(0, 300)}` },
+        { status: 502 }
+      );
     }
 
     const geminiData = await geminiRes.json();
     const text = geminiData.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
 
-    try {
-      roofData = JSON.parse(text);
-      break;
-    } catch {
-      lastError = `JSON parse failed: ${text.slice(0, 200)}`;
+    if (!text) {
+      return NextResponse.json(
+        { error: "Empty Gemini response", detail: `finishReason=${geminiData.candidates?.[0]?.finishReason}` },
+        { status: 502 }
+      );
     }
+
+    roofData = JSON.parse(text);
+  } catch (e) {
+    return NextResponse.json(
+      { error: "Gemini request failed", detail: String(e) },
+      { status: 502 }
+    );
   }
 
-  if (!roofData || !roofData.segments) {
+  if (!roofData.segments || roofData.segments.length === 0) {
     return NextResponse.json(
-      { error: "Failed to detect roof", detail: lastError },
+      { error: "No roof segments detected" },
       { status: 502 }
     );
   }
 
   // 3. ピクセル座標をメートル座標に変換
-  // Google Maps Static APIのズームレベルから1ピクセルあたりのメートルを計算
   const metersPerPixel =
     (156543.03392 * Math.cos((lat * Math.PI) / 180)) / Math.pow(2, zoom);
 
   const centerPx = roofData.building_center ?? { x: size / 2, y: size / 2 };
 
-  const segments = (roofData.segments ?? []).map(
-    (seg: { points: { x: number; y: number }[]; direction: string; label: string }) => ({
-      points: seg.points.map((p: { x: number; y: number }) => ({
-        x: (p.x - centerPx.x) * metersPerPixel,
-        y: (p.y - centerPx.y) * metersPerPixel,
-      })),
-      direction: seg.direction,
-      label: seg.label,
-    })
-  );
+  const segments = roofData.segments.map((seg) => ({
+    points: seg.points.map((p) => ({
+      x: (p.x - centerPx.x) * metersPerPixel,
+      y: (p.y - centerPx.y) * metersPerPixel,
+    })),
+    direction: seg.direction,
+    label: seg.label,
+  }));
 
   return NextResponse.json({
     segments,
     metersPerPixel,
-    imageBase64: imgBase64,
     imageSize: size,
   });
 }
