@@ -214,7 +214,7 @@ export default function ClientPage({ mapsApiKey }: Props) {
             <div className="rounded-2xl overflow-hidden border border-white/10 shadow-xl">
               <div className="bg-white/5 px-4 py-2.5 border-b border-white/10 text-xs text-white/50 flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" />
-                衛星写真 — 緑色がパネル設置候補エリア
+                衛星写真
               </div>
               <SolarMap insights={insights} apiKey={mapsApiKey} />
             </div>
