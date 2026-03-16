@@ -11,17 +11,17 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 }
 
 export async function POST(req: NextRequest) {
-  const geminiKey = process.env.GEMINI_API_KEY;
+  const xaiKey = process.env.XAI_API_KEY;
   const mapsKey = process.env.GOOGLE_MAPS_API_KEY;
 
-  if (!geminiKey || !mapsKey) {
+  if (!xaiKey || !mapsKey) {
     return NextResponse.json(
-      { error: "API keys not configured", detail: `gemini=${!!geminiKey}, maps=${!!mapsKey}` },
+      { error: "API keys not configured", detail: `xai=${!!xaiKey}, maps=${!!mapsKey}` },
       { status: 500 }
     );
   }
 
-  const { lat, lng, zoom = 20, roofHint } = await req.json();
+  const { lat, lng, zoom = 20 } = await req.json();
   if (!lat || !lng) {
     return NextResponse.json({ error: "lat and lng are required" }, { status: 400 });
   }
@@ -56,9 +56,7 @@ export async function POST(req: NextRequest) {
     (156543.03392 * Math.cos((lat * Math.PI) / 180)) / Math.pow(2, zoom);
   const imageWidthM = (size * metersPerPixel).toFixed(1);
 
-  // 3. Gemini APIで屋根形状を検出
-  void roofHint; // Solar APIヒントは現在未使用（画像優先）
-
+  // 3. Grok Vision APIで屋根形状を検出
   const prompt = `この衛星写真（${size}x${size}px、実寸約${imageWidthM}m四方）の中央にある建物の屋根を解析してください。
 
 【タスク】
@@ -76,66 +74,21 @@ export async function POST(req: NextRequest) {
 【重要：画像を優先すること】
 - 事前情報より画像に写っている実際の形状を優先してください
 - この建物は複合屋根（寄棟＋切妻の組み合わせ）の可能性があります
-- 屋根面の境界線（稜線）を画像から丁寧にトレースしてください`;
+- 屋根面の境界線（稜線）を画像から丁寧にトレースしてください
 
-  const responseSchema = {
-    type: "OBJECT" as const,
-    properties: {
-      building_angle: { type: "NUMBER" as const },
-      faces: {
-        type: "ARRAY" as const,
-        items: {
-          type: "OBJECT" as const,
-          properties: {
-            id: { type: "STRING" as const },
-            points: {
-              type: "ARRAY" as const,
-              items: {
-                type: "ARRAY" as const,
-                items: { type: "NUMBER" as const },
-              },
-            },
-            slope_direction: { type: "NUMBER" as const },
-            ridge_edge: {
-              type: "ARRAY" as const,
-              items: { type: "NUMBER" as const },
-            },
-            eave_edge: {
-              type: "ARRAY" as const,
-              items: { type: "NUMBER" as const },
-            },
-          },
-          required: ["id", "points", "slope_direction"],
-        },
-      },
-    },
-    required: ["building_angle", "faces"],
-  };
-
-  const geminiUrl =
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
-
-  const geminiBody = {
-    contents: [
-      {
-        parts: [
-          {
-            inline_data: {
-              mime_type: "image/png",
-              data: imgBase64,
-            },
-          },
-          { text: prompt },
-        ],
-      },
-    ],
-    generationConfig: {
-      temperature: 0.2,
-      maxOutputTokens: 16384,
-      responseMimeType: "application/json",
-      responseSchema,
-    },
-  };
+以下のJSON形式のみで返してください。説明文は不要です。
+{
+  "building_angle": 数値,
+  "faces": [
+    {
+      "id": "face_1",
+      "points": [[x1,y1],[x2,y2],[x3,y3],[x4,y4]],
+      "slope_direction": 数値,
+      "ridge_edge": [辺インデックス],
+      "eave_edge": [辺インデックス]
+    }
+  ]
+}`;
 
   interface RoofFace {
     id: string;
@@ -152,34 +105,67 @@ export async function POST(req: NextRequest) {
   let roofData: RoofData;
 
   try {
-    const geminiRes = await fetch(geminiUrl, {
+    const grokRes = await fetch("https://api.x.ai/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(geminiBody),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${xaiKey}`,
+      },
+      body: JSON.stringify({
+        model: "grok-2-vision-latest",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:image/png;base64,${imgBase64}`,
+                },
+              },
+              {
+                type: "text",
+                text: prompt,
+              },
+            ],
+          },
+        ],
+        temperature: 0.1,
+        max_tokens: 16384,
+      }),
     });
 
-    if (!geminiRes.ok) {
-      const errText = await geminiRes.text();
+    if (!grokRes.ok) {
+      const errText = await grokRes.text();
       return NextResponse.json(
-        { error: "Gemini API error", detail: `${geminiRes.status}: ${errText.slice(0, 300)}` },
+        { error: "Grok API error", detail: `${grokRes.status}: ${errText.slice(0, 300)}` },
         { status: 502 }
       );
     }
 
-    const geminiData = await geminiRes.json();
-    const text = geminiData.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    const grokData = await grokRes.json();
+    const text = grokData.choices?.[0]?.message?.content ?? "";
 
     if (!text) {
       return NextResponse.json(
-        { error: "Empty Gemini response", detail: `finishReason=${geminiData.candidates?.[0]?.finishReason}` },
+        { error: "Empty Grok response", detail: `finish_reason=${grokData.choices?.[0]?.finish_reason}` },
         { status: 502 }
       );
     }
 
-    roofData = JSON.parse(text);
+    // JSONを抽出（```json ... ``` で囲まれている場合に対応）
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      return NextResponse.json(
+        { error: "No JSON in Grok response", detail: text.slice(0, 300) },
+        { status: 502 }
+      );
+    }
+
+    roofData = JSON.parse(jsonMatch[0]);
   } catch (e) {
     return NextResponse.json(
-      { error: "Gemini request failed", detail: String(e) },
+      { error: "Grok request failed", detail: String(e) },
       { status: 502 }
     );
   }

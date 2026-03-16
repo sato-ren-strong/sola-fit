@@ -465,7 +465,7 @@ export default function RoofSimulator({ insights }: Props) {
         {detecting && (
           <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-slate-900/90">
             <div className="w-12 h-12 rounded-full border-4 border-emerald-400/30 border-t-emerald-400 animate-spin" />
-            <p className="text-white/70 text-sm mt-3">Gemini が屋根形状を解析中...</p>
+            <p className="text-white/70 text-sm mt-3">Grok が屋根形状を解析中...</p>
           </div>
         )}
 
@@ -519,7 +519,7 @@ export default function RoofSimulator({ insights }: Props) {
 
       <div className="flex items-center justify-between">
         <p className="text-xs text-gray-400">
-          ※ Gemini AIが衛星写真から屋根形状を検出。棟/軒を識別し各社パネルを配置した参考シミュレーションです。
+          ※ Grok AIが衛星写真から屋根形状を検出。棟/軒を識別し各社パネルを配置した参考シミュレーションです。
         </p>
         <button
           onClick={detectRoof}
