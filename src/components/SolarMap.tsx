@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { setOptions, importLibrary } from "@googlemaps/js-api-loader";
 import { BuildingInsights } from "@/types/solar";
 import { fromArrayBuffer } from "geotiff";
@@ -92,11 +92,14 @@ async function renderFluxOverlay(
   }
 }
 
+type HeatmapStatus = "loading" | "loaded" | "unavailable" | "error";
+
 export default function SolarMap({ insights, apiKey }: Props) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
   const overlaysRef = useRef<google.maps.Polygon[]>([]);
   const groundOverlayRef = useRef<google.maps.GroundOverlay | null>(null);
+  const [heatmapStatus, setHeatmapStatus] = useState<HeatmapStatus>("loading");
 
   useEffect(() => {
     if (!mapRef.current) return;
@@ -174,30 +177,51 @@ export default function SolarMap({ insights, apiKey }: Props) {
       // --- DataLayers flux overlay ---
       try {
         const layersRes = await fetch(`/api/solar-layers?lat=${latitude}&lng=${longitude}`);
-        if (layersRes.ok) {
+        if (!layersRes.ok) {
+          setHeatmapStatus("unavailable");
+        } else {
           const layers = await layersRes.json();
           if (layers.annualFluxUrl && layers.maskUrl) {
             const overlay = await renderFluxOverlay(layers.annualFluxUrl, layers.maskUrl);
             if (overlay) {
               const { canvas, bounds } = overlay;
               const dataUrl = canvas.toDataURL("image/png");
-              const groundOverlay = new GroundOverlay(dataUrl, bounds, { opacity: 0.8 });
+              const groundOverlay = new GroundOverlay(dataUrl, bounds, { opacity: 0.85 });
               groundOverlay.setMap(map);
               groundOverlayRef.current = groundOverlay;
+              setHeatmapStatus("loaded");
+            } else {
+              setHeatmapStatus("error");
             }
+          } else {
+            setHeatmapStatus("unavailable");
           }
         }
       } catch (e) {
         console.warn("dataLayers overlay failed", e);
+        setHeatmapStatus("error");
       }
     })();
   }, [insights, apiKey]);
 
   return (
-    <div
-      ref={mapRef}
-      className="w-full rounded-xl overflow-hidden"
-      style={{ height: "380px" }}
-    />
+    <div className="relative w-full">
+      <div ref={mapRef} className="w-full rounded-xl overflow-hidden" style={{ height: "380px" }} />
+      {/* Heatmap status badge */}
+      <div className="absolute bottom-3 left-3 flex items-center gap-1.5 bg-black/60 backdrop-blur-sm text-xs px-2.5 py-1.5 rounded-full text-white/80">
+        {heatmapStatus === "loading" && (
+          <><span className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse inline-block" />ヒートマップ読込中…</>
+        )}
+        {heatmapStatus === "loaded" && (
+          <><span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" />日照ヒートマップ表示中</>
+        )}
+        {heatmapStatus === "unavailable" && (
+          <><span className="w-2 h-2 rounded-full bg-gray-400 inline-block" />この地域はヒートマップ非対応</>
+        )}
+        {heatmapStatus === "error" && (
+          <><span className="w-2 h-2 rounded-full bg-red-400 inline-block" />ヒートマップ取得失敗</>
+        )}
+      </div>
+    </div>
   );
 }
