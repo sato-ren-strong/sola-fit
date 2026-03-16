@@ -1,105 +1,33 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { setOptions, importLibrary } from "@googlemaps/js-api-loader";
 import { BuildingInsights } from "@/types/solar";
-import { fromArrayBuffer } from "geotiff";
 
 interface Props {
   insights: BuildingInsights;
   apiKey: string;
 }
 
-// Solar flux colormap: black → red → yellow → white
-function fluxToRgba(value: number, min: number, max: number): [number, number, number] {
+// Map sunshine (kWh/kW/year) to a color: blue → green → yellow → red
+function sunshineColor(value: number, min: number, max: number): string {
   const t = Math.max(0, Math.min(1, (value - min) / (max - min || 1)));
-  if (t < 0.33) {
-    const s = t / 0.33;
-    return [Math.round(s * 255), 0, 0];
-  } else if (t < 0.66) {
-    const s = (t - 0.33) / 0.33;
-    return [255, Math.round(s * 255), 0];
+  if (t < 0.5) {
+    const s = t / 0.5;
+    const r = Math.round(s * 255);
+    const g = Math.round(s * 200);
+    return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}ff`;
   } else {
-    const s = (t - 0.66) / 0.34;
-    return [255, 255, Math.round(s * 255)];
+    const s = (t - 0.5) / 0.5;
+    const g = Math.round((1 - s) * 200);
+    const b = Math.round((1 - s) * 255);
+    return `#ff${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
   }
 }
-
-async function renderFluxOverlay(
-  fluxTileUrl: string,
-  maskTileUrl: string
-): Promise<{ canvas: HTMLCanvasElement; bounds: { north: number; south: number; east: number; west: number } } | null> {
-  try {
-    const [fluxRes, maskRes] = await Promise.all([
-      fetch(`/api/solar-layers?tileUrl=${encodeURIComponent(fluxTileUrl)}`),
-      fetch(`/api/solar-layers?tileUrl=${encodeURIComponent(maskTileUrl)}`),
-    ]);
-    if (!fluxRes.ok || !maskRes.ok) return null;
-
-    const [fluxBuf, maskBuf] = await Promise.all([fluxRes.arrayBuffer(), maskRes.arrayBuffer()]);
-
-    const fluxTiff = await fromArrayBuffer(fluxBuf);
-    const maskTiff = await fromArrayBuffer(maskBuf);
-
-    const fluxImage = await fluxTiff.getImage();
-    const maskImage = await maskTiff.getImage();
-
-    const fluxData = (await fluxImage.readRasters())[0] as Float32Array;
-    const maskData = (await maskImage.readRasters())[0] as Uint8Array;
-
-    const width = fluxImage.getWidth();
-    const height = fluxImage.getHeight();
-    const bbox = fluxImage.getBoundingBox(); // [west, south, east, north]
-
-    // Compute min/max of valid (masked) pixels
-    let min = Infinity, max = -Infinity;
-    for (let i = 0; i < fluxData.length; i++) {
-      if (maskData[i] > 0 && isFinite(fluxData[i])) {
-        if (fluxData[i] < min) min = fluxData[i];
-        if (fluxData[i] > max) max = fluxData[i];
-      }
-    }
-
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d")!;
-    const imageData = ctx.createImageData(width, height);
-
-    for (let i = 0; i < fluxData.length; i++) {
-      const masked = maskData[i] > 0;
-      const idx = i * 4;
-      if (masked && isFinite(fluxData[i])) {
-        const [r, g, b] = fluxToRgba(fluxData[i], min, max);
-        imageData.data[idx] = r;
-        imageData.data[idx + 1] = g;
-        imageData.data[idx + 2] = b;
-        imageData.data[idx + 3] = 200; // semi-transparent
-      } else {
-        imageData.data[idx + 3] = 0; // transparent
-      }
-    }
-
-    ctx.putImageData(imageData, 0, 0);
-
-    return {
-      canvas,
-      bounds: { west: bbox[0], south: bbox[1], east: bbox[2], north: bbox[3] },
-    };
-  } catch (e) {
-    console.error("flux overlay error", e);
-    return null;
-  }
-}
-
-type HeatmapStatus = "loading" | "loaded" | "unavailable" | "error";
 
 export default function SolarMap({ insights, apiKey }: Props) {
   const mapRef = useRef<HTMLDivElement>(null);
-  const mapInstanceRef = useRef<google.maps.Map | null>(null);
-  const overlaysRef = useRef<google.maps.Polygon[]>([]);
-  const groundOverlayRef = useRef<google.maps.GroundOverlay | null>(null);
-  const [heatmapStatus, setHeatmapStatus] = useState<HeatmapStatus>("loading");
+  const overlaysRef = useRef<(google.maps.Polygon | google.maps.Rectangle)[]>([]);
 
   useEffect(() => {
     if (!mapRef.current) return;
@@ -107,7 +35,7 @@ export default function SolarMap({ insights, apiKey }: Props) {
     setOptions({ key: apiKey, v: "weekly" });
 
     (async () => {
-      const { Map, GroundOverlay } = await importLibrary("maps");
+      const { Map } = await importLibrary("maps");
       const { latitude, longitude } = insights.center;
 
       const map = new Map(mapRef.current!, {
@@ -120,18 +48,42 @@ export default function SolarMap({ insights, apiKey }: Props) {
         fullscreenControl: true,
       });
 
-      mapInstanceRef.current = map;
-
-      // Clear previous overlays
       overlaysRef.current.forEach((p) => p.setMap(null));
       overlaysRef.current = [];
-      if (groundOverlayRef.current) {
-        groundOverlayRef.current.setMap(null);
-        groundOverlayRef.current = null;
-      }
 
-      // --- Existing panel rectangles (kept as-is) ---
-      const { solarPanels, panelHeightMeters, panelWidthMeters } = insights.solarPotential;
+      const { solarPotential } = insights;
+      const { roofSegmentStats, solarPanels, panelHeightMeters, panelWidthMeters } = solarPotential;
+
+      // --- Roof segments colored by sunshine ---
+      const sunshineValues = roofSegmentStats
+        .map((seg) => seg.stats.sunshineQuantiles?.[5] ?? 0)
+        .filter((v) => v > 0);
+      const minSun = Math.min(...sunshineValues);
+      const maxSun = Math.max(...sunshineValues);
+
+      roofSegmentStats.forEach((seg) => {
+        const { sw, ne } = seg.boundingBox;
+        const sunshine = seg.stats.sunshineQuantiles?.[5] ?? 0;
+        const color = sunshineColor(sunshine, minSun, maxSun);
+
+        const rect = new google.maps.Rectangle({
+          bounds: {
+            south: sw.latitude,
+            west: sw.longitude,
+            north: ne.latitude,
+            east: ne.longitude,
+          },
+          strokeColor: color,
+          strokeOpacity: 0.9,
+          strokeWeight: 2,
+          fillColor: color,
+          fillOpacity: 0.35,
+          map,
+        });
+        overlaysRef.current.push(rect);
+      });
+
+      // --- Individual panel rectangles ---
       solarPanels.forEach((panel) => {
         const { latitude: pLat, longitude: pLng } = panel.center;
         const metersPerDegreeLat = 111320;
@@ -163,7 +115,6 @@ export default function SolarMap({ insights, apiKey }: Props) {
       new google.maps.Marker({
         position: { lat: latitude, lng: longitude },
         map,
-        title: "解析対象の建物",
         icon: {
           path: google.maps.SymbolPath.CIRCLE,
           scale: 6,
@@ -173,55 +124,14 @@ export default function SolarMap({ insights, apiKey }: Props) {
           strokeWeight: 2,
         },
       });
-
-      // --- DataLayers flux overlay ---
-      try {
-        const layersRes = await fetch(`/api/solar-layers?lat=${latitude}&lng=${longitude}`);
-        if (!layersRes.ok) {
-          setHeatmapStatus("unavailable");
-        } else {
-          const layers = await layersRes.json();
-          if (layers.annualFluxUrl && layers.maskUrl) {
-            const overlay = await renderFluxOverlay(layers.annualFluxUrl, layers.maskUrl);
-            if (overlay) {
-              const { canvas, bounds } = overlay;
-              const dataUrl = canvas.toDataURL("image/png");
-              const groundOverlay = new GroundOverlay(dataUrl, bounds, { opacity: 0.85 });
-              groundOverlay.setMap(map);
-              groundOverlayRef.current = groundOverlay;
-              setHeatmapStatus("loaded");
-            } else {
-              setHeatmapStatus("error");
-            }
-          } else {
-            setHeatmapStatus("unavailable");
-          }
-        }
-      } catch (e) {
-        console.warn("dataLayers overlay failed", e);
-        setHeatmapStatus("error");
-      }
     })();
   }, [insights, apiKey]);
 
   return (
-    <div className="relative w-full">
-      <div ref={mapRef} className="w-full rounded-xl overflow-hidden" style={{ height: "380px" }} />
-      {/* Heatmap status badge */}
-      <div className="absolute bottom-3 left-3 flex items-center gap-1.5 bg-black/60 backdrop-blur-sm text-xs px-2.5 py-1.5 rounded-full text-white/80">
-        {heatmapStatus === "loading" && (
-          <><span className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse inline-block" />ヒートマップ読込中…</>
-        )}
-        {heatmapStatus === "loaded" && (
-          <><span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" />日照ヒートマップ表示中</>
-        )}
-        {heatmapStatus === "unavailable" && (
-          <><span className="w-2 h-2 rounded-full bg-gray-400 inline-block" />この地域はヒートマップ非対応</>
-        )}
-        {heatmapStatus === "error" && (
-          <><span className="w-2 h-2 rounded-full bg-red-400 inline-block" />ヒートマップ取得失敗</>
-        )}
-      </div>
-    </div>
+    <div
+      ref={mapRef}
+      className="w-full rounded-xl overflow-hidden"
+      style={{ height: "380px" }}
+    />
   );
 }
