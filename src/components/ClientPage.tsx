@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import dynamic from "next/dynamic";
 import { BuildingInsights } from "@/types/solar";
 
@@ -17,6 +17,17 @@ export default function ClientPage({ mapsApiKey }: Props) {
   const [status, setStatus] = useState<Status>("idle");
   const [insights, setInsights] = useState<BuildingInsights | null>(null);
   const [errorMsg, setErrorMsg] = useState<string>("");
+  const addressRef = useRef<HTMLInputElement>(null);
+
+  const fetchSolar = useCallback(async (lat: number, lng: number) => {
+    setStatus("fetching");
+    const res = await fetch(`/api/solar?lat=${lat}&lng=${lng}`);
+    if (!res.ok) {
+      const body = await res.json();
+      throw new Error(body.detail ?? body.error ?? `HTTP ${res.status}`);
+    }
+    return res.json() as Promise<BuildingInsights>;
+  }, []);
 
   const handleLocate = useCallback(() => {
     if (!navigator.geolocation) {
@@ -24,24 +35,14 @@ export default function ClientPage({ mapsApiKey }: Props) {
       setStatus("error");
       return;
     }
-
     setStatus("locating");
     setInsights(null);
     setErrorMsg("");
 
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
-        const lat = pos.coords.latitude;
-        const lng = pos.coords.longitude;
-        setStatus("fetching");
-
         try {
-          const res = await fetch(`/api/solar?lat=${lat}&lng=${lng}`);
-          if (!res.ok) {
-            const body = await res.json();
-            throw new Error(body.detail ?? body.error ?? `HTTP ${res.status}`);
-          }
-          const data: BuildingInsights = await res.json();
+          const data = await fetchSolar(pos.coords.latitude, pos.coords.longitude);
           setInsights(data);
           setStatus("done");
         } catch (err) {
@@ -55,6 +56,36 @@ export default function ClientPage({ mapsApiKey }: Props) {
       },
       { enableHighAccuracy: true, timeout: 10000 }
     );
+  }, [fetchSolar]);
+
+  const handleAddressSearch = useCallback(async () => {
+    const address = addressRef.current?.value.trim();
+    if (!address) return;
+
+    setStatus("locating");
+    setInsights(null);
+    setErrorMsg("");
+
+    try {
+      const res = await fetch(`/api/geocode?address=${encodeURIComponent(address)}`);
+      if (!res.ok) {
+        const body = await res.json();
+        throw new Error(body.error ?? "住所が見つかりませんでした");
+      }
+      const { lat, lng } = await res.json();
+      const data = await fetchSolar(lat, lng);
+      setInsights(data);
+      setStatus("done");
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "不明なエラー");
+      setStatus("error");
+    }
+  }, [fetchSolar]);
+
+  const reset = useCallback(() => {
+    setStatus("idle");
+    setInsights(null);
+    setErrorMsg("");
   }, []);
 
   return (
@@ -73,7 +104,7 @@ export default function ClientPage({ mapsApiKey }: Props) {
 
       <div className="max-w-5xl mx-auto px-4 py-8 space-y-6">
         {status === "idle" && (
-          <div className="text-center py-16 space-y-6">
+          <div className="text-center py-12 space-y-8">
             <div className="space-y-2">
               <h2 className="text-4xl font-black tracking-tight">
                 あなたの屋根に
@@ -81,17 +112,44 @@ export default function ClientPage({ mapsApiKey }: Props) {
                 <span className="text-emerald-400">何枚貼れる？</span>
               </h2>
               <p className="text-white/60 text-lg">
-                位置情報を取得するだけで、各社の太陽光パネルの設置可能枚数をシミュレーション
+                位置情報または住所から、各社の太陽光パネル設置枚数をシミュレーション
               </p>
             </div>
-            <button
-              onClick={handleLocate}
-              className="inline-flex items-center gap-2 bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-white font-bold text-lg px-8 py-4 rounded-2xl shadow-lg shadow-emerald-500/30 transition-all"
-            >
-              <span className="text-xl">📍</span>
-              現在地を取得して解析
-            </button>
-            <p className="text-white/30 text-sm">
+
+            {/* Address input */}
+            <div className="max-w-lg mx-auto space-y-3">
+              <div className="flex gap-2">
+                <input
+                  ref={addressRef}
+                  type="text"
+                  placeholder="住所を入力（例：東京都渋谷区1-1-1）"
+                  onKeyDown={(e) => e.key === "Enter" && handleAddressSearch()}
+                  className="flex-1 bg-white/10 border border-white/20 rounded-xl px-4 py-3 text-white placeholder-white/30 focus:outline-none focus:border-emerald-400 focus:bg-white/15 transition-all text-sm"
+                />
+                <button
+                  onClick={handleAddressSearch}
+                  className="bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-white font-bold px-5 py-3 rounded-xl shadow-lg shadow-emerald-500/30 transition-all text-sm whitespace-nowrap"
+                >
+                  検索
+                </button>
+              </div>
+
+              <div className="flex items-center gap-3 text-white/30 text-xs">
+                <div className="flex-1 h-px bg-white/10" />
+                または
+                <div className="flex-1 h-px bg-white/10" />
+              </div>
+
+              <button
+                onClick={handleLocate}
+                className="w-full inline-flex items-center justify-center gap-2 bg-white/10 hover:bg-white/20 active:scale-95 text-white font-semibold text-sm px-6 py-3 rounded-xl border border-white/20 transition-all"
+              >
+                <span>📍</span>
+                現在地を自動取得
+              </button>
+            </div>
+
+            <p className="text-white/30 text-xs">
               Google Solar API を使用。位置情報はサーバーに保存されません。
             </p>
           </div>
@@ -101,7 +159,7 @@ export default function ClientPage({ mapsApiKey }: Props) {
           <div className="flex flex-col items-center justify-center py-20 gap-4">
             <div className="w-16 h-16 rounded-full border-4 border-emerald-400/30 border-t-emerald-400 animate-spin" />
             <p className="text-white/70 font-medium">
-              {status === "locating" ? "📍 位置情報を取得中..." : "☀ 屋根を解析中..."}
+              {status === "locating" ? "📍 住所を検索中..." : "☀ 屋根を解析中..."}
             </p>
           </div>
         )}
@@ -110,10 +168,7 @@ export default function ClientPage({ mapsApiKey }: Props) {
           <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-6 text-center space-y-3">
             <p className="text-red-400 font-semibold">エラーが発生しました</p>
             <p className="text-white/60 text-sm">{errorMsg}</p>
-            <button
-              onClick={() => setStatus("idle")}
-              className="text-sm bg-white/10 hover:bg-white/20 px-4 py-2 rounded-xl transition-colors"
-            >
+            <button onClick={reset} className="text-sm bg-white/10 hover:bg-white/20 px-4 py-2 rounded-xl transition-colors">
               もう一度試す
             </button>
           </div>
@@ -145,15 +200,11 @@ export default function ClientPage({ mapsApiKey }: Props) {
               <div>
                 <div className="text-xs text-white/40 uppercase tracking-wider">撮影日</div>
                 <div className="font-semibold mt-1 text-sm">
-                  {insights.imageryDate.year}/{insights.imageryDate.month}/
-                  {insights.imageryDate.day}
+                  {insights.imageryDate.year}/{insights.imageryDate.month}/{insights.imageryDate.day}
                 </div>
               </div>
               <div className="ml-auto">
-                <button
-                  onClick={() => { setStatus("idle"); setInsights(null); }}
-                  className="text-sm bg-white/10 hover:bg-white/20 px-4 py-2 rounded-xl transition-colors"
-                >
+                <button onClick={reset} className="text-sm bg-white/10 hover:bg-white/20 px-4 py-2 rounded-xl transition-colors">
                   再取得
                 </button>
               </div>
