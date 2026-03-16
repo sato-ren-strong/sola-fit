@@ -112,7 +112,7 @@ export async function POST(req: NextRequest) {
         Authorization: `Bearer ${xaiKey}`,
       },
       body: JSON.stringify({
-        model: "grok-2-vision-latest",
+        model: "grok-2-vision-1212",
         messages: [
           {
             role: "user",
