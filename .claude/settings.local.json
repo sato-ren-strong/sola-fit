@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(. ~/.nvm/nvm.sh && npm run build 2>&1)",
+      "WebSearch",
+      "Bash(git config:*)"
+    ]
+  }
+}
