@@ -52,52 +52,54 @@ export async function POST(req: NextRequest) {
   }
 
   // 2. Gemini APIで屋根形状を検出
-  const prompt = `この衛星写真の中央にある建物の屋根の形状を検出してください。
+  const prompt = `以下の衛星写真の建物屋根を解析し、太陽光パネル設置図面用のデータをJSON形式のみで返してください。
 
-ルール:
-- 屋根の各面をポリゴンとして返す（最大4セグメントまで）
-- 各ポリゴンは4〜6頂点以内でシンプルに表現する
-- 座標は画像のピクセル座標（${size}x${size}px）
-- 各セグメントに方位(direction)とラベル(label)を付ける`;
+【検出してほしい情報】
+1. 屋根各面の輪郭ポリゴン（ピクセル座標、画像サイズは${size}x${size}px）
+2. 各面の勾配方向（雨水が流れる方向を0-360度で、北=0）
+3. 棟・軒の識別（どの辺が棟でどの辺が軒か）
+4. 建物全体の主軸角度（度）
+
+【注意】
+- ridge_edge/eave_edgeはpointsの辺インデックス（0=points[0]-points[1]の辺）
+- 隣接する面は頂点を共有すること
+- 各面は4〜6頂点以内でシンプルに
+- 最大6面まで
+- 返答はJSONのみ。説明文不要`;
 
   const responseSchema = {
     type: "OBJECT" as const,
     properties: {
-      segments: {
+      building_angle: { type: "NUMBER" as const },
+      faces: {
         type: "ARRAY" as const,
         items: {
           type: "OBJECT" as const,
           properties: {
+            id: { type: "STRING" as const },
             points: {
               type: "ARRAY" as const,
               items: {
-                type: "OBJECT" as const,
-                properties: {
-                  x: { type: "NUMBER" as const },
-                  y: { type: "NUMBER" as const },
-                },
-                required: ["x", "y"],
+                type: "ARRAY" as const,
+                items: { type: "NUMBER" as const },
               },
             },
-            direction: {
-              type: "STRING" as const,
-              enum: ["north", "south", "east", "west", "southeast", "southwest", "northeast", "northwest"],
+            slope_direction: { type: "NUMBER" as const },
+            ridge_edge: {
+              type: "ARRAY" as const,
+              items: { type: "NUMBER" as const },
             },
-            label: { type: "STRING" as const },
+            eave_edge: {
+              type: "ARRAY" as const,
+              items: { type: "NUMBER" as const },
+            },
+            area_m2: { type: "NUMBER" as const },
           },
-          required: ["points", "direction", "label"],
+          required: ["id", "points", "slope_direction"],
         },
-      },
-      building_center: {
-        type: "OBJECT" as const,
-        properties: {
-          x: { type: "NUMBER" as const },
-          y: { type: "NUMBER" as const },
-        },
-        required: ["x", "y"],
       },
     },
-    required: ["segments", "building_center"],
+    required: ["building_angle", "faces"],
   };
 
   const geminiUrl =
@@ -126,9 +128,18 @@ export async function POST(req: NextRequest) {
     },
   };
 
-  interface RoofPoint { x: number; y: number }
-  interface RoofSegment { points: RoofPoint[]; direction: string; label: string }
-  interface RoofData { segments: RoofSegment[]; building_center: RoofPoint }
+  interface RoofFace {
+    id: string;
+    points: number[][];
+    slope_direction: number;
+    ridge_edge?: number[];
+    eave_edge?: number[];
+    area_m2?: number;
+  }
+  interface RoofData {
+    building_angle: number;
+    faces: RoofFace[];
+  }
 
   let roofData: RoofData;
 
@@ -165,9 +176,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  if (!roofData.segments || roofData.segments.length === 0) {
+  if (!roofData.faces || roofData.faces.length === 0) {
     return NextResponse.json(
-      { error: "No roof segments detected" },
+      { error: "No roof faces detected" },
       { status: 502 }
     );
   }
@@ -176,19 +187,23 @@ export async function POST(req: NextRequest) {
   const metersPerPixel =
     (156543.03392 * Math.cos((lat * Math.PI) / 180)) / Math.pow(2, zoom);
 
-  const centerPx = roofData.building_center ?? { x: size / 2, y: size / 2 };
+  const centerPx = size / 2;
 
-  const segments = roofData.segments.map((seg) => ({
-    points: seg.points.map((p) => ({
-      x: (p.x - centerPx.x) * metersPerPixel,
-      y: (p.y - centerPx.y) * metersPerPixel,
+  const faces = roofData.faces.map((face) => ({
+    id: face.id,
+    points: face.points.map((p) => ({
+      x: (p[0] - centerPx) * metersPerPixel,
+      y: (p[1] - centerPx) * metersPerPixel,
     })),
-    direction: seg.direction,
-    label: seg.label,
+    slope_direction: face.slope_direction,
+    ridge_edge: face.ridge_edge,
+    eave_edge: face.eave_edge,
+    area_m2: face.area_m2,
   }));
 
   return NextResponse.json({
-    segments,
+    building_angle: roofData.building_angle,
+    faces,
     metersPerPixel,
     imageSize: size,
   });

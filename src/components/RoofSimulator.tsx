@@ -9,10 +9,19 @@ interface Point {
   y: number;
 }
 
-interface RoofSegment {
+interface RoofFace {
+  id: string;
   points: Point[];
-  direction: string;
-  label: string;
+  slope_direction: number;
+  ridge_edge?: number[];
+  eave_edge?: number[];
+  area_m2?: number;
+}
+
+interface RoofDetectResult {
+  building_angle: number;
+  faces: RoofFace[];
+  metersPerPixel: number;
 }
 
 interface Props {
@@ -47,21 +56,34 @@ function shrinkPolygon(polygon: Point[], amount: number): Point[] {
   });
 }
 
-// 方位 → 色
-function directionColor(dir: string): string {
-  const d = dir.toLowerCase();
-  if (d.includes("south") || d.includes("南")) return "#f59e0b";
-  if (d.includes("east") || d.includes("東")) return "#3b82f6";
-  if (d.includes("west") || d.includes("西")) return "#8b5cf6";
-  return "#6b7280";
+// 勾配方向(0-360) → 色
+function slopeColor(deg: number): string {
+  const d = ((deg % 360) + 360) % 360;
+  if (d >= 135 && d <= 225) return "#f59e0b"; // 南
+  if (d >= 45 && d < 135) return "#3b82f6";   // 東
+  if (d > 225 && d <= 315) return "#8b5cf6";  // 西
+  return "#6b7280";                            // 北
+}
+
+// 勾配方向 → ラベル
+function slopeLabel(deg: number): string {
+  const d = ((deg % 360) + 360) % 360;
+  if (d >= 157.5 && d <= 202.5) return "南";
+  if (d > 202.5 && d <= 247.5) return "南西";
+  if (d > 247.5 && d <= 292.5) return "西";
+  if (d > 292.5 && d <= 337.5) return "北西";
+  if (d > 337.5 || d <= 22.5) return "北";
+  if (d > 22.5 && d <= 67.5) return "北東";
+  if (d > 67.5 && d <= 112.5) return "東";
+  return "南東";
 }
 
 export default function RoofSimulator({ insights }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [selectedId, setSelectedId] = useState(COMPANIES[0].id);
   const [panelCount, setPanelCount] = useState(0);
-  const [segmentDetails, setSegmentDetails] = useState<{ label: string; count: number; color: string }[]>([]);
-  const [roofSegments, setRoofSegments] = useState<RoofSegment[] | null>(null);
+  const [faceDetails, setFaceDetails] = useState<{ label: string; count: number; color: string }[]>([]);
+  const [roofResult, setRoofResult] = useState<RoofDetectResult | null>(null);
   const [detecting, setDetecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -83,7 +105,7 @@ export default function RoofSimulator({ insights }: Props) {
         throw new Error(`${body.error ?? `HTTP ${res.status}`}${body.detail ? ` (${body.detail})` : ""}`);
       }
       const data = await res.json();
-      setRoofSegments(data.segments);
+      setRoofResult(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "屋根検出に失敗しました");
     } finally {
@@ -99,17 +121,18 @@ export default function RoofSimulator({ insights }: Props) {
   // Canvas描画
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !roofSegments || roofSegments.length === 0) return;
+    if (!canvas || !roofResult || roofResult.faces.length === 0) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
+    const { faces } = roofResult;
     const W = canvas.width;
     const H = canvas.height;
 
-    // 全体の範囲を求める
+    // 全体の範囲
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const seg of roofSegments) {
-      for (const p of seg.points) {
+    for (const face of faces) {
+      for (const p of face.points) {
         if (p.x < minX) minX = p.x;
         if (p.x > maxX) maxX = p.x;
         if (p.y < minY) minY = p.y;
@@ -155,11 +178,12 @@ export default function RoofSimulator({ insights }: Props) {
       ctx.beginPath(); ctx.moveTo(c1.x, c1.y); ctx.lineTo(c2.x, c2.y); ctx.stroke();
     }
 
-    // セグメントをポリゴンで描画
-    for (const seg of roofSegments) {
-      const color = directionColor(seg.direction);
-      const canvasPoly = seg.points.map(toCanvas);
+    // 屋根面を描画
+    for (const face of faces) {
+      const color = slopeColor(face.slope_direction);
+      const canvasPoly = face.points.map(toCanvas);
 
+      // 塗りつぶし
       ctx.beginPath();
       ctx.moveTo(canvasPoly[0].x, canvasPoly[0].y);
       for (let i = 1; i < canvasPoly.length; i++) {
@@ -168,17 +192,54 @@ export default function RoofSimulator({ insights }: Props) {
       ctx.closePath();
       ctx.fillStyle = color + "20";
       ctx.fill();
-      ctx.strokeStyle = color + "cc";
-      ctx.lineWidth = 2.5;
+
+      // 通常の辺
+      ctx.strokeStyle = color + "aa";
+      ctx.lineWidth = 1.5;
       ctx.stroke();
 
-      // ラベル
+      // 棟線（ridge）を太く
+      if (face.ridge_edge && face.ridge_edge.length > 0) {
+        ctx.strokeStyle = "#ef4444cc";
+        ctx.lineWidth = 3;
+        for (const edgeIdx of face.ridge_edge) {
+          const p1 = canvasPoly[edgeIdx];
+          const p2 = canvasPoly[(edgeIdx + 1) % canvasPoly.length];
+          if (p1 && p2) {
+            ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+          }
+        }
+      }
+
+      // 軒線（eave）を破線で
+      if (face.eave_edge && face.eave_edge.length > 0) {
+        ctx.strokeStyle = "#22d3eecc";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 3]);
+        for (const edgeIdx of face.eave_edge) {
+          const p1 = canvasPoly[edgeIdx];
+          const p2 = canvasPoly[(edgeIdx + 1) % canvasPoly.length];
+          if (p1 && p2) {
+            ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+          }
+        }
+        ctx.setLineDash([]);
+      }
+
+      // ラベル（重心）
       const cx = canvasPoly.reduce((s, p) => s + p.x, 0) / canvasPoly.length;
       const cy = canvasPoly.reduce((s, p) => s + p.y, 0) / canvasPoly.length;
+
       ctx.fillStyle = color + "dd";
-      ctx.font = "bold 12px sans-serif";
+      ctx.font = "bold 11px sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText(seg.label, cx, cy);
+      ctx.fillText(`${slopeLabel(face.slope_direction)}面`, cx, cy - 4);
+      ctx.font = "9px sans-serif";
+      ctx.fillStyle = color + "99";
+      ctx.fillText(`${face.slope_direction}°`, cx, cy + 9);
+      if (face.area_m2) {
+        ctx.fillText(`${face.area_m2.toFixed(1)}m²`, cx, cy + 20);
+      }
       ctx.textAlign = "start";
     }
 
@@ -190,9 +251,9 @@ export default function RoofSimulator({ insights }: Props) {
     let totalCount = 0;
     const details: { label: string; count: number; color: string }[] = [];
 
-    for (const seg of roofSegments) {
-      const shrunk = shrinkPolygon(seg.points, 0.2);
-      const color = directionColor(seg.direction);
+    for (const face of faces) {
+      const shrunk = shrinkPolygon(face.points, 0.2);
+      const color = slopeColor(face.slope_direction);
 
       let sMinX = Infinity, sMaxX = -Infinity, sMinY = Infinity, sMaxY = -Infinity;
       for (const p of shrunk) {
@@ -202,7 +263,7 @@ export default function RoofSimulator({ insights }: Props) {
         if (p.y > sMaxY) sMaxY = p.y;
       }
 
-      let segCount = 0;
+      let faceCount = 0;
       for (let mx = sMinX; mx + pW <= sMaxX; mx += pW + gap) {
         for (let my = sMinY; my + pH <= sMaxY; my += pH + gap) {
           const corners: Point[] = [
@@ -222,7 +283,7 @@ export default function RoofSimulator({ insights }: Props) {
           ctx.lineWidth = 0.5;
           ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
 
-          // セル風の線
+          // セル風の中央線
           const pw = br.x - tl.x;
           ctx.strokeStyle = company.color + "40";
           ctx.lineWidth = 0.3;
@@ -231,18 +292,22 @@ export default function RoofSimulator({ insights }: Props) {
           ctx.lineTo(tl.x + pw / 2, br.y);
           ctx.stroke();
 
-          segCount++;
+          faceCount++;
         }
       }
 
-      if (segCount > 0) {
-        details.push({ label: seg.label, count: segCount, color });
+      if (faceCount > 0) {
+        details.push({
+          label: `${slopeLabel(face.slope_direction)}面`,
+          count: faceCount,
+          color,
+        });
       }
-      totalCount += segCount;
+      totalCount += faceCount;
     }
 
     setPanelCount(totalCount);
-    setSegmentDetails(details);
+    setFaceDetails(details);
 
     // スケールバー
     const scaleBarM = Math.max(1, Math.round((maxX - minX) / 4));
@@ -260,7 +325,24 @@ export default function RoofSimulator({ insights }: Props) {
     ctx.fillText(`${scaleBarM}m`, sbX + scaleBarPx / 2, sbY - 6);
     ctx.textAlign = "start";
 
-  }, [roofSegments, company]);
+    // 凡例（棟/軒）
+    const legY = 16;
+    ctx.font = "10px sans-serif";
+    ctx.strokeStyle = "#ef4444cc";
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(12, legY); ctx.lineTo(32, legY); ctx.stroke();
+    ctx.fillStyle = "#ffffffaa";
+    ctx.textAlign = "start";
+    ctx.fillText("棟", 36, legY + 3);
+
+    ctx.strokeStyle = "#22d3eecc";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 3]);
+    ctx.beginPath(); ctx.moveTo(60, legY); ctx.lineTo(80, legY); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillText("軒", 84, legY + 3);
+
+  }, [roofResult, company]);
 
   const totalKw = (panelCount * company.panelWatts) / 1000;
 
@@ -309,8 +391,8 @@ export default function RoofSimulator({ insights }: Props) {
         )}
 
         {error && (
-          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-slate-900/90 gap-3">
-            <p className="text-red-400 text-sm">{error}</p>
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-slate-900/90 gap-3 px-6">
+            <p className="text-red-400 text-sm text-center">{error}</p>
             <button
               onClick={detectRoof}
               className="text-sm bg-white/10 hover:bg-white/20 px-4 py-2 rounded-xl transition-colors text-white"
@@ -323,7 +405,7 @@ export default function RoofSimulator({ insights }: Props) {
         <canvas ref={canvasRef} width={800} height={500} className="w-full h-auto" />
 
         {/* パネル情報オーバーレイ */}
-        {roofSegments && roofSegments.length > 0 && (
+        {roofResult && roofResult.faces.length > 0 && (
           <div className="absolute top-3 right-3 bg-black/80 backdrop-blur text-white text-xs px-4 py-3 rounded-lg space-y-1.5 min-w-[160px]">
             <div className="font-bold text-sm" style={{ color: company.color }}>{company.name}</div>
             <div className="text-white/60">{company.modelName}</div>
@@ -336,9 +418,9 @@ export default function RoofSimulator({ insights }: Props) {
               </div>
               <div className="text-white/50">{totalKw.toFixed(2)} kW</div>
             </div>
-            {segmentDetails.length > 0 && (
+            {faceDetails.length > 0 && (
               <div className="border-t border-white/10 pt-1.5 mt-1.5 space-y-0.5">
-                {segmentDetails.map((d, i) => (
+                {faceDetails.map((d, i) => (
                   <div key={i} className="flex justify-between gap-3">
                     <span style={{ color: d.color }}>{d.label}</span>
                     <span>{d.count}枚</span>
@@ -346,18 +428,21 @@ export default function RoofSimulator({ insights }: Props) {
                 ))}
               </div>
             )}
+            <div className="border-t border-white/10 pt-1.5 mt-1.5 text-white/40">
+              建物角度: {roofResult.building_angle}°
+            </div>
           </div>
         )}
       </div>
 
       <div className="flex items-center justify-between">
         <p className="text-xs text-gray-400">
-          ※ Gemini AIが衛星写真から屋根形状を検出。各社パネルサイズで配置した参考シミュレーションです。
+          ※ Gemini AIが衛星写真から屋根形状を検出。棟/軒を識別し各社パネルを配置した参考シミュレーションです。
         </p>
         <button
           onClick={detectRoof}
           disabled={detecting}
-          className="text-xs text-emerald-400 hover:text-emerald-300 transition-colors disabled:opacity-50"
+          className="text-xs text-emerald-400 hover:text-emerald-300 transition-colors disabled:opacity-50 whitespace-nowrap ml-2"
         >
           再検出
         </button>
