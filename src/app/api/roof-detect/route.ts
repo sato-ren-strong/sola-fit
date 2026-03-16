@@ -30,78 +30,105 @@ export async function POST(req: NextRequest) {
 
   // 2. Gemini APIで屋根形状を検出
   const prompt = `この衛星写真の中央にある建物の屋根の形状を検出してください。
+屋根の各面（セグメント）をポリゴンとして返してください。
+座標は画像のピクセル座標（画像サイズは${size}x${size}ピクセル）で返してください。
+各セグメントに推定される方位を含めてください。`;
 
-以下のルールに従ってください：
-- 屋根の各面（セグメント）をポリゴンとして返してください
-- 座標は画像のピクセル座標で返してください（画像サイズは${size}x${size}ピクセル）
-- 各セグメントに推定される方位（north/south/east/west）を含めてください
-- JSONのみ返してください。説明文は不要です
-
-以下のJSON形式で返してください：
-{
-  "segments": [
-    {
-      "points": [{"x": 100, "y": 100}, {"x": 200, "y": 100}, {"x": 200, "y": 200}, {"x": 100, "y": 200}],
-      "direction": "south",
-      "label": "南面"
-    }
-  ],
-  "building_center": {"x": 320, "y": 320}
-}`;
+  const responseSchema = {
+    type: "OBJECT",
+    properties: {
+      segments: {
+        type: "ARRAY",
+        items: {
+          type: "OBJECT",
+          properties: {
+            points: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: {
+                  x: { type: "NUMBER" },
+                  y: { type: "NUMBER" },
+                },
+                required: ["x", "y"],
+              },
+            },
+            direction: {
+              type: "STRING",
+              enum: ["north", "south", "east", "west", "southeast", "southwest", "northeast", "northwest"],
+            },
+            label: { type: "STRING" },
+          },
+          required: ["points", "direction", "label"],
+        },
+      },
+      building_center: {
+        type: "OBJECT",
+        properties: {
+          x: { type: "NUMBER" },
+          y: { type: "NUMBER" },
+        },
+        required: ["x", "y"],
+      },
+    },
+    required: ["segments", "building_center"],
+  };
 
   const geminiUrl =
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
 
-  const geminiRes = await fetch(geminiUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [
-        {
-          parts: [
-            {
-              inline_data: {
-                mime_type: "image/png",
-                data: imgBase64,
-              },
+  const geminiBody = {
+    contents: [
+      {
+        parts: [
+          {
+            inline_data: {
+              mime_type: "image/png",
+              data: imgBase64,
             },
-            { text: prompt },
-          ],
-        },
-      ],
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 2048,
+          },
+          { text: prompt },
+        ],
       },
-    }),
-  });
+    ],
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: 4096,
+      responseMimeType: "application/json",
+      responseSchema,
+    },
+  };
 
-  if (!geminiRes.ok) {
-    const body = await geminiRes.text();
-    return NextResponse.json(
-      { error: `Gemini API error: ${geminiRes.status}`, detail: body },
-      { status: 502 }
-    );
+  // リトライ（最大2回）
+  let roofData: { segments: { points: { x: number; y: number }[]; direction: string; label: string }[]; building_center: { x: number; y: number } } | null = null;
+  let lastError = "";
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const geminiRes = await fetch(geminiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(geminiBody),
+    });
+
+    if (!geminiRes.ok) {
+      lastError = `Gemini API error: ${geminiRes.status} - ${await geminiRes.text()}`;
+      continue;
+    }
+
+    const geminiData = await geminiRes.json();
+    const text = geminiData.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+
+    try {
+      roofData = JSON.parse(text);
+      break;
+    } catch {
+      lastError = `JSON parse failed: ${text.slice(0, 200)}`;
+    }
   }
 
-  const geminiData = await geminiRes.json();
-  const text = geminiData.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-
-  // JSONを抽出（```json ... ``` で囲まれている場合に対応）
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
+  if (!roofData || !roofData.segments) {
     return NextResponse.json(
-      { error: "Failed to parse Gemini response", raw: text },
-      { status: 502 }
-    );
-  }
-
-  let roofData;
-  try {
-    roofData = JSON.parse(jsonMatch[0]);
-  } catch {
-    return NextResponse.json(
-      { error: "Invalid JSON from Gemini", raw: text },
+      { error: "Failed to detect roof", detail: lastError },
       { status: 502 }
     );
   }

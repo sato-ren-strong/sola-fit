@@ -5,7 +5,11 @@
       "WebSearch",
       "Bash(git config:*)",
       "Bash(. ~/.nvm/nvm.sh && npm install geotiff 2>&1 | tail -3)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(npx next:*)",
+      "Bash(gh auth:*)",
+      "Bash(git:*)",
+      "Bash(npx tsc:*)"
     ]
   }
 }
