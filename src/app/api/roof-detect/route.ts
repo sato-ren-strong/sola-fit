@@ -98,7 +98,7 @@ export async function POST(req: NextRequest) {
   };
 
   const geminiUrl =
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`;
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
 
   const geminiBody = {
     contents: [
@@ -119,6 +119,7 @@ export async function POST(req: NextRequest) {
       maxOutputTokens: 4096,
       responseMimeType: "application/json",
       responseSchema,
+      thinkingConfig: { thinkingBudget: 0 },
     },
   };
 
