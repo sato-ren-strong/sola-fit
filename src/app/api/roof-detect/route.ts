@@ -53,9 +53,12 @@ export async function POST(req: NextRequest) {
 
   // 2. Gemini APIで屋根形状を検出
   const prompt = `この衛星写真の中央にある建物の屋根の形状を検出してください。
-屋根の各面（セグメント）をポリゴンとして返してください。
-座標は画像のピクセル座標（画像サイズは${size}x${size}ピクセル）で返してください。
-各セグメントに推定される方位を含めてください。`;
+
+ルール:
+- 屋根の各面をポリゴンとして返す（最大4セグメントまで）
+- 各ポリゴンは4〜6頂点以内でシンプルに表現する
+- 座標は画像のピクセル座標（${size}x${size}px）
+- 各セグメントに方位(direction)とラベル(label)を付ける`;
 
   const responseSchema = {
     type: "OBJECT" as const,
@@ -116,7 +119,7 @@ export async function POST(req: NextRequest) {
     ],
     generationConfig: {
       temperature: 0.1,
-      maxOutputTokens: 4096,
+      maxOutputTokens: 8192,
       responseMimeType: "application/json",
       responseSchema,
       thinkingConfig: { thinkingBudget: 0 },
