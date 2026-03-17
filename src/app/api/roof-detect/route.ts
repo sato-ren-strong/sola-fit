@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
   const staticMapUrl =
     `https://maps.googleapis.com/maps/api/staticmap` +
     `?center=${lat},${lng}&zoom=${zoom}&size=${size}x${size}` +
-    `&maptype=satellite&key=${mapsKey}`;
+    `&maptype=satellite&markers=color:red|${lat},${lng}&key=${mapsKey}`;
 
   let imgBase64: string;
   try {
@@ -62,7 +62,7 @@ export async function POST(req: NextRequest) {
       },
       body: JSON.stringify({
         model: "grok-imagine-image",
-        prompt: "この衛星写真の画像中央にある1棟の建物の屋根のみに、明るい黄色の線で輪郭を描いてください。屋根の稜線（棟線・谷線）も黄色い線で描いてください。中央の建物以外（隣の家・地面・駐車場など）には絶対に線を引かないでください。元の衛星写真はそのまま残し、線だけを追加してください。",
+        prompt: "この衛星写真に赤いピンが立っています。赤いピンが立っている建物の屋根のみに明るい黄色の線で以下を描いてください：屋根の外周輪郭、棟線・谷線（屋根面の境界線）。赤いピンのない建物・地面・駐車場には絶対に線を引かないでください。元の衛星写真はそのまま残し、線だけを追加してください。",
         image: {
           url: `data:image/png;base64,${imgBase64}`,
           type: "image_url",
