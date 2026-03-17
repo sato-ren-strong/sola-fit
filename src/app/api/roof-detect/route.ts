@@ -21,7 +21,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { lat, lng, zoom = 20 } = await req.json();
+  const { lat, lng, zoom = 21 } = await req.json();
   if (!lat || !lng) {
     return NextResponse.json({ error: "lat and lng are required" }, { status: 400 });
   }
