@@ -56,6 +56,10 @@ export interface BuildingInsights {
     solarPanels: SolarPanel[];
     solarPanelConfigs: SolarPanelConfig[];
   };
+  boundingBox: {
+    sw: LatLng;
+    ne: LatLng;
+  };
 }
 
 export interface SolarCompany {

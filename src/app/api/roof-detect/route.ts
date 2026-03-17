@@ -21,17 +21,49 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { lat, lng, zoom = 21 } = await req.json();
+  const { lat, lng, boundingBox } = await req.json();
   if (!lat || !lng) {
     return NextResponse.json({ error: "lat and lng are required" }, { status: 400 });
   }
 
-  // 1. Google Maps Static APIで衛星画像を取得
+  // 1. BoundingBoxからぴったりの衛星画像を取得
+  // Solar APIのboundingBoxに少しマージンを足す
   const size = 640;
-  const staticMapUrl =
-    `https://maps.googleapis.com/maps/api/staticmap` +
-    `?center=${lat},${lng}&zoom=${zoom}&size=${size}x${size}` +
-    `&maptype=satellite&key=${mapsKey}`;
+  let staticMapUrl: string;
+  let metersPerPixel: number;
+
+  if (boundingBox) {
+    const { sw, ne } = boundingBox;
+    // マージン追加（bboxの10%）
+    const latMargin = (ne.latitude - sw.latitude) * 0.15;
+    const lngMargin = (ne.longitude - sw.longitude) * 0.15;
+    const swLat = sw.latitude - latMargin;
+    const swLng = sw.longitude - lngMargin;
+    const neLat = ne.latitude + latMargin;
+    const neLng = ne.longitude + lngMargin;
+
+    // visible パラメータでBBox範囲にフィット（zoomを自動計算させる）
+    staticMapUrl =
+      `https://maps.googleapis.com/maps/api/staticmap` +
+      `?center=${lat},${lng}` +
+      `&visible=${swLat},${swLng}|${neLat},${neLng}` +
+      `&size=${size}x${size}` +
+      `&maptype=satellite&key=${mapsKey}`;
+
+    // BBox範囲からメートル/ピクセルを概算
+    const latRange = neLat - swLat;
+    const metersRange = latRange * 111320;
+    metersPerPixel = metersRange / size;
+  } else {
+    // フォールバック: zoom 21
+    const zoom = 21;
+    staticMapUrl =
+      `https://maps.googleapis.com/maps/api/staticmap` +
+      `?center=${lat},${lng}&zoom=${zoom}&size=${size}x${size}` +
+      `&maptype=satellite&key=${mapsKey}`;
+    metersPerPixel =
+      (156543.03392 * Math.cos((lat * Math.PI) / 180)) / Math.pow(2, zoom);
+  }
 
   let imgBase64: string;
   try {
@@ -78,8 +110,6 @@ export async function POST(req: NextRequest) {
     }
 
     const grokData = await grokRes.json();
-
-    // レスポンスから生成画像URLまたはbase64を取得
     const outputUrl = grokData.data?.[0]?.url ?? grokData.data?.[0]?.b64_json;
 
     if (!outputUrl) {
@@ -89,7 +119,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // URLの場合はfetchしてbase64に変換
     let annotatedBase64: string;
     if (outputUrl.startsWith("http")) {
       const imgFetch = await fetch(outputUrl);
@@ -98,10 +127,6 @@ export async function POST(req: NextRequest) {
     } else {
       annotatedBase64 = `data:image/png;base64,${outputUrl}`;
     }
-
-    // メートル/ピクセル計算
-    const metersPerPixel =
-      (156543.03392 * Math.cos((lat * Math.PI) / 180)) / Math.pow(2, zoom);
 
     return NextResponse.json({
       annotatedImage: annotatedBase64,

@@ -38,10 +38,12 @@ export default function RoofSimulator({ insights }: Props) {
     setError(null);
     try {
       const { latitude: lat, longitude: lng } = insights.center;
+      // Solar APIの建物boundingBoxを渡して、建物だけにフォーカスした画像を取得
+      const bbox = insights.boundingBox;
       const res = await fetch("/api/roof-detect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lat, lng, zoom: 21 }),
+        body: JSON.stringify({ lat, lng, boundingBox: bbox }),
       });
       if (!res.ok) {
         const body = await res.json();
